@@ -35,6 +35,14 @@
     "trace"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/4M01/pw-sanitizer.git"
+  },
+  "homepage": "https://github.com/4M01/pw-sanitizer#readme",
+  "bugs": {
+    "url": "https://github.com/4M01/pw-sanitizer/issues"
+  },
   "dependencies": {
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
