@@ -4,12 +4,18 @@ import { validateRule } from '../config/validator.js';
 import { logger } from '../logger.js';
 
 /**
- * Builds the full list of remove rules by merging:
- * 1. All rules from ruleFiles (in order)
- * 2. Inline rules from config.rules
+ * Builds the complete, deduplicated list of {@link RemoveRule}s for a run.
  *
- * No built-in rules are added. Only what the user declared.
- * Warns on duplicate `label` values (last-write-wins).
+ * Merge order:
+ * 1. All rules loaded from `config.ruleFiles` (in declaration order)
+ * 2. Inline rules from `config.rules`
+ *
+ * No built-in rules are ever injected — only what the user explicitly declared.
+ * If the same `label` appears more than once, a warning is emitted and the **last**
+ * definition wins (last-write-wins semantics).
+ *
+ * @param config - The `remove` section of the sanitizer config.
+ * @returns Deduplicated array of validated {@link RemoveRule}s, ready for use.
  */
 export async function buildRuleRegistry(
   config: RemoveConfig

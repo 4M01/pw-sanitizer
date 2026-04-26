@@ -2,17 +2,29 @@ import { sanitize } from './index.js';
 import { logger } from './logger.js';
 
 /**
- * Playwright globalTeardown integration.
+ * Playwright `globalTeardown` integration for `playwright-sanitizer`.
  *
- * Export this as the default function for use with Playwright's globalTeardown:
+ * Register this as the `globalTeardown` hook in your Playwright config and the
+ * sanitizer will run automatically after every test suite completes. Config is
+ * auto-discovered from `playwright-sanitizer.config.ts` (or the `sanitizer`
+ * key inside `playwright.config.ts`) — no arguments needed.
  *
- *   // playwright.config.ts
- *   export default defineConfig({
- *     globalTeardown: require.resolve('playwright-sanitizer/teardown'),
- *   });
+ * @example
+ * ```ts
+ * // playwright.config.ts
+ * import { defineConfig } from '@playwright/test';
  *
- * Config is auto-discovered from playwright-sanitizer.config.ts or
- * the sanitizer key in playwright.config.ts.
+ * export default defineConfig({
+ *   globalTeardown: require.resolve('playwright-sanitizer/teardown'),
+ * });
+ * ```
+ *
+ * @remarks
+ * Errors thrown by the sanitizer are **caught and logged** rather than
+ * re-thrown. This is intentional: a post-processing failure must never mask
+ * the actual test results that Playwright has already recorded.
+ *
+ * @returns A promise that resolves when sanitization completes (or fails gracefully).
  */
 export default async function teardown(): Promise<void> {
   try {

@@ -4,12 +4,18 @@ import { validatePattern } from '../config/validator.js';
 import { logger } from '../logger.js';
 
 /**
- * Builds the full list of redact patterns by merging:
- * 1. All patterns from patternFiles (in order)
- * 2. Inline patterns from config.patterns
+ * Builds the complete, deduplicated list of {@link RedactPattern}s for a run.
  *
- * No built-in patterns are added. Only what the user declared.
- * Warns on duplicate `id` values (last-write-wins).
+ * Merge order:
+ * 1. All patterns loaded from `config.patternFiles` (in declaration order)
+ * 2. Inline patterns from `config.patterns`
+ *
+ * No built-in patterns are ever injected — only what the user explicitly declared.
+ * If the same `id` appears more than once, a warning is emitted and the **last**
+ * definition wins (last-write-wins semantics).
+ *
+ * @param config - The `redact` section of the sanitizer config.
+ * @returns Deduplicated array of validated {@link RedactPattern}s, ready for use.
  */
 export async function buildPatternRegistry(
   config: RedactConfig

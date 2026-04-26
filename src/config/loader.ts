@@ -3,6 +3,10 @@ import * as path from 'node:path';
 import type { SanitizerConfig } from './types.js';
 import { logger } from '../logger.js';
 
+/**
+ * Ordered list of config file names that are auto-discovered in the current
+ * working directory when no explicit `--config` path is provided.
+ */
 const CONFIG_FILE_NAMES = [
   'playwright-sanitizer.config.ts',
   'playwright-sanitizer.config.js',
@@ -10,7 +14,15 @@ const CONFIG_FILE_NAMES = [
 ];
 
 /**
- * Loads config from a specific file path.
+ * Loads a {@link SanitizerConfig} from an explicit file path.
+ *
+ * - `.json` files are parsed with `JSON.parse`.
+ * - `.ts` / `.js` files are loaded via dynamic `import()`.
+ *   If loading a `.ts` file fails, a compiled `.js` sibling is tried automatically.
+ *
+ * @param filePath - Absolute or relative path to the config file.
+ * @returns The resolved {@link SanitizerConfig}.
+ * @throws Calls `logger.fatal` (which throws) if the file is not found or cannot be parsed.
  */
 async function loadConfigFromFile(filePath: string): Promise<SanitizerConfig> {
   const absolutePath = path.resolve(filePath);
@@ -53,7 +65,14 @@ async function loadConfigFromFile(filePath: string): Promise<SanitizerConfig> {
 }
 
 /**
- * Tries to load the 'sanitizer' key from playwright.config.ts/.js.
+ * Attempts to load a sanitizer config from the `sanitizer` key inside
+ * `playwright.config.ts` or `playwright.config.js` in the given directory.
+ *
+ * Returns `null` if no Playwright config is found, the file cannot be
+ * loaded, or it does not contain a `sanitizer` key.
+ *
+ * @param cwd - The directory to search for a Playwright config file.
+ * @returns The embedded {@link SanitizerConfig}, or `null` if not found.
  */
 async function loadFromPlaywrightConfig(cwd: string): Promise<SanitizerConfig | null> {
   const candidates = ['playwright.config.ts', 'playwright.config.js'];
@@ -77,14 +96,31 @@ async function loadFromPlaywrightConfig(cwd: string): Promise<SanitizerConfig | 
 }
 
 /**
- * Resolves and loads the sanitizer config.
+ * Resolves and loads the sanitizer configuration.
  *
- * Priority:
- * 1. Explicit configPath (from --config CLI flag)
- * 2. playwright-sanitizer.config.ts
- * 3. playwright-sanitizer.config.js
- * 4. playwright-sanitizer.config.json
- * 5. sanitizer key inside playwright.config.ts
+ * Config discovery priority (first match wins):
+ * 1. Explicit `configPath` (from `--config` CLI flag or programmatic call)
+ * 2. `playwright-sanitizer.config.ts` in `cwd`
+ * 3. `playwright-sanitizer.config.js` in `cwd`
+ * 4. `playwright-sanitizer.config.json` in `cwd`
+ * 5. `sanitizer` key inside `playwright.config.ts` / `playwright.config.js`
+ *
+ * If none of the above are found, the function calls `logger.fatal` which
+ * throws an `Error` with an actionable message.
+ *
+ * @param configPath - Optional explicit path to a config file.
+ *   When provided, auto-discovery is skipped entirely.
+ * @returns The resolved {@link SanitizerConfig}.
+ * @throws Calls `logger.fatal` (which throws) when no config can be found or loaded.
+ *
+ * @example
+ * ```ts
+ * // Auto-discover config in cwd
+ * const config = await loadConfig();
+ *
+ * // Load from an explicit path
+ * const config = await loadConfig('./configs/sanitizer.config.ts');
+ * ```
  */
 export async function loadConfig(configPath?: string): Promise<SanitizerConfig> {
   const cwd = process.cwd();

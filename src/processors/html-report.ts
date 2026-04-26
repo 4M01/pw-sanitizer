@@ -13,17 +13,41 @@ import { removeSteps } from '../remove/remover.js';
 import { repairTimestamps } from '../remove/timestamp-repair.js';
 import { logger } from '../logger.js';
 
+/**
+ * Regex that locates the embedded JSON blob inside a Playwright HTML report.
+ *
+ * Playwright injects report data as:
+ * `window.__pw_report_data__ = { ... };</script>`
+ *
+ * The first capture group (`[1]`) contains the raw JSON object literal.
+ * The `s` flag allows `.` to match newlines (the blob can be multi-line).
+ */
 const REPORT_DATA_REGEX =
   /window\.__pw_report_data__\s*=\s*(\{.+?\});\s*<\/script>/s;
 
 /**
- * Processes a single Playwright HTML report file.
+ * Sanitizes a single Playwright HTML report file.
  *
- * 1. Reads the HTML file
- * 2. Locates the embedded JSON blob
- * 3. If redact section present: runs walkAndRedact
- * 4. If remove section present: runs findStepsToRemove -> removeSteps -> repairTimestamps
- * 5. Writes output per config.output.mode
+ * Processing pipeline:
+ * 1. Read the HTML file from disk.
+ * 2. Extract the embedded `window.__pw_report_data__` JSON blob via regex.
+ * 3. **Redact phase** (if `config.redact` is set and patterns are loaded):
+ *    walk the JSON tree with {@link walkAndRedact} and replace matched values.
+ * 4. **Remove phase** (if `config.remove` is set and rules are loaded):
+ *    extract step events, run {@link findStepsToRemove}, then
+ *    {@link removeSteps} and {@link repairTimestamps}.
+ * 5. Re-serialise the JSON and splice it back into the original HTML.
+ * 6. Write the output according to `config.output.mode`.
+ *
+ * On any unrecoverable parse error, the function logs a warning and returns
+ * an empty {@link ProcessResult} rather than throwing.
+ *
+ * @param inputPath  - Absolute path to the source HTML report file.
+ * @param outputPath - Destination path for the sanitized output.
+ * @param config     - The full sanitizer configuration.
+ * @param patterns   - Pre-built list of redact patterns (from {@link buildPatternRegistry}).
+ * @param rules      - Pre-built list of removal rules (from {@link buildRuleRegistry}).
+ * @returns A {@link ProcessResult} with counts and match details for this file.
  */
 export async function processHtmlReport(
   inputPath: string,
@@ -130,8 +154,17 @@ export async function processHtmlReport(
 }
 
 /**
- * Extracts a flat array of step/action events from the report data structure.
- * Playwright HTML reports nest steps within suites and tests.
+ * Flattens the nested Playwright HTML report structure into a single array of
+ * step/action events that can be processed by the removal pipeline.
+ *
+ * Playwright HTML reports nest steps under `suites → tests → results → steps`.
+ * This function performs a depth-first traversal, collecting any node that
+ * looks like a step (has `startTime`/`endTime`, `title`, or `action` fields)
+ * and recursing into known container keys (`steps`, `actions`, `suites`,
+ * `tests`, `results`, `attachments`).
+ *
+ * @param data - The parsed `window.__pw_report_data__` object.
+ * @returns A flat array of event-like objects cast to {@link TraceEvent}.
  */
 function extractEventsFromReport(data: unknown): TraceEvent[] {
   const events: TraceEvent[] = [];
@@ -170,8 +203,18 @@ function extractEventsFromReport(data: unknown): TraceEvent[] {
 }
 
 /**
- * Replaces events in the report data structure after removal.
- * Since events are object references, mutations apply to the original tree.
+ * Placeholder for post-removal tree reconstruction in HTML reports.
+ *
+ * In the current implementation, step mutations during the redact walk phase
+ * are applied directly to object references within the report tree, which is
+ * sufficient for the redaction use-case.
+ *
+ * Full step-removal support for HTML reports would require rebuilding the
+ * nested `steps` arrays in each test result to exclude the removed events —
+ * this is tracked as a future enhancement.
+ *
+ * @param _data           - The parsed report data (unused — present for future implementation).
+ * @param _repairedEvents - The repaired event array (unused — present for future implementation).
  */
 function replaceEventsInReport(
   _data: unknown,
@@ -188,7 +231,16 @@ function replaceEventsInReport(
 }
 
 /**
- * Writes output based on the configured output mode.
+ * Writes sanitized HTML content to disk according to the configured output mode.
+ *
+ * - **`in-place`**: overwrites the original file at `inputPath`.
+ * - **`side-by-side`**: writes `<basename>.sanitized<ext>` next to the original.
+ * - **`copy`** *(default)*: mirrors the file into `outputPath`, creating parent dirs as needed.
+ *
+ * @param inputPath  - Absolute path to the original file (used for `in-place` and `side-by-side`).
+ * @param outputPath - Computed destination path (used for `copy` mode).
+ * @param content    - The sanitized HTML string to write.
+ * @param config     - The full sanitizer configuration (read for `output.mode`).
  */
 function writeOutput(
   inputPath: string,

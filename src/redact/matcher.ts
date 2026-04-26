@@ -2,10 +2,14 @@ import type { RedactConfig, RedactPattern, RedactionResult } from '../config/typ
 import { logger } from '../logger.js';
 
 /**
- * Tests whether a key matches a pattern's key field.
+ * Tests whether an event key matches a pattern's `key` field.
  *
- * - String pattern.key: exact case-insensitive match
- * - RegExp pattern.key: tested against the key
+ * - `string` → exact case-insensitive comparison
+ * - `RegExp` → tested against the raw key string
+ *
+ * @param key - The key to test (e.g. a header name or JSON property name).
+ * @param patternKey - The matcher from {@link RedactPattern.key}.
+ * @returns `true` if the key satisfies the matcher.
  */
 function matchesKey(key: string, patternKey: string | RegExp): boolean {
   if (typeof patternKey === 'string') {
@@ -15,15 +19,34 @@ function matchesKey(key: string, patternKey: string | RegExp): boolean {
 }
 
 /**
- * Tests whether a value matches a pattern's valuePattern.
+ * Tests whether a string value satisfies a pattern's `valuePattern` regexp.
+ *
+ * @param value - The string value to test.
+ * @param valuePattern - The regexp from {@link RedactPattern.valuePattern}.
+ * @returns `true` if the regexp matches.
  */
 function matchesValue(value: string, valuePattern: RegExp): boolean {
   return valuePattern.test(value);
 }
 
 /**
- * Applies partial redaction: keep first `prefix` and last `suffix` characters,
- * replace the middle with '***'.
+ * Applies partial redaction to a string value.
+ *
+ * Keeps the first `prefix` characters and last `suffix` characters visible,
+ * replacing everything in between with `'***'`.
+ * If the value is too short for partial redaction (`length <= prefix + suffix`),
+ * the entire value is replaced with `'***'`.
+ *
+ * @param value  - The original string value to partially redact.
+ * @param prefix - Number of leading characters to keep visible.
+ * @param suffix - Number of trailing characters to keep visible.
+ * @returns The partially redacted string.
+ *
+ * @example
+ * ```ts
+ * applyPartialRedaction('Bearer eyJhbGci', 4, 4); // 'Bear***lci'
+ * applyPartialRedaction('short', 4, 4);           // '***'  (too short)
+ * ```
  */
 function applyPartialRedaction(
   value: string,
@@ -40,10 +63,26 @@ function applyPartialRedaction(
 }
 
 /**
- * Determines if a key/value pair should be redacted based on the provided patterns.
- * Returns the redaction result including the replacement value.
+ * Evaluates a key/value pair against the full list of patterns and returns
+ * a {@link RedactionResult} describing whether — and how — it was redacted.
  *
- * NEVER logs the matched value — only the key name and pattern id.
+ * Matching rules:
+ * - Pattern with only `key`: key must match.
+ * - Pattern with only `valuePattern`: value must match.
+ * - Pattern with both: **both** must match (AND logic).
+ * - Patterns are tested in order; the **first** match wins.
+ *
+ * @remarks
+ * This function intentionally **never logs the matched value** to prevent
+ * secrets from appearing in log output. Only the key name and pattern ID
+ * are logged at verbose level.
+ *
+ * @param key      - The field name (e.g. header name, JSON property key).
+ * @param value    - The current string value of the field.
+ * @param patterns - Ordered list of {@link RedactPattern}s to test against.
+ * @param config   - The redact config, used to resolve placeholder / partial-redaction settings.
+ * @returns A {@link RedactionResult} with `redacted: false` if no pattern matched,
+ *   or `redacted: true` with the replacement value and matched pattern ID.
  */
 export function redactValue(
   key: string,

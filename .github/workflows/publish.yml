@@ -1,15 +1,21 @@
 name: Publish to npm
 
+# Triggered automatically when a GitHub Release is published.
+# To publish: create a Release in the GitHub UI (or via `gh release create`).
+# Required repository secret: NPM_TOKEN
+#   → Settings → Secrets and variables → Actions → New repository secret
 on:
   release:
     types: [published]
 
 jobs:
   publish:
+    name: Build, test & publish
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
+      # Required for npm provenance attestation (--provenance flag)
       id-token: write
 
     steps:
@@ -21,11 +27,13 @@ jobs:
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
+          # Enables caching of npm's dependency cache between runs
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint
+      - name: Lint (type-check)
         run: npm run lint
 
       - name: Run tests
@@ -35,6 +43,11 @@ jobs:
         run: npm run build
 
       - name: Publish to npm
+        # --provenance: attach a signed SLSA provenance attestation to the package
+        # --access public: required for scoped packages; harmless for unscoped ones
         run: npm publish --provenance --access public
         env:
+          # Set NPM_TOKEN in: GitHub repo → Settings → Secrets → Actions
+          # Generate the token at: https://www.npmjs.com/settings/<username>/tokens
+          # Token type: "Automation" (bypasses 2FA for CI) or "Granular" with publish permission
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

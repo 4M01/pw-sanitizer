@@ -7,8 +7,29 @@ import type {
 import { redactValue } from './matcher.js';
 
 /**
- * Recursively walks a JSON structure and redacts values matching the provided patterns.
- * Returns a new structure (never mutates input) with redaction stats.
+ * Recursively traverses a JSON-like structure and redacts any string values
+ * that match the provided patterns.
+ *
+ * Traversal rules:
+ * - **Arrays**: each element is walked with an indexed path (e.g. `items[0].token`).
+ * - **Objects**: each property is visited; the key is tested against patterns.
+ * - **Strings**: tested via {@link redactValue}. If not redacted, the value is also
+ *   tested as embedded JSON (a string that is itself a JSON object/array) and, if
+ *   parseable, the inner structure is walked recursively and re-serialised.
+ * - **Base64 JSON bodies**: if an object has a `Content-Type: application/json`
+ *   sibling and a body-like field containing base64 data, the decoded JSON is
+ *   walked and the field is re-encoded after redaction.
+ * - **Numbers / booleans**: copied through as-is (never redacted).
+ * - **`null` / `undefined`**: returned unchanged.
+ *
+ * The input is **never mutated** — a new tree is produced for each call.
+ *
+ * @param obj      - The JSON value to walk. Typically a parsed `trace.json` array
+ *   or the `window.__pw_report_data__` object extracted from an HTML report.
+ * @param patterns - Ordered list of {@link RedactPattern}s to apply.
+ * @param config   - The redact config, forwarded to {@link redactValue} for placeholder resolution.
+ * @returns A {@link WalkResult} containing the transformed tree, total redaction count,
+ *   and the list of individual {@link RedactionMatch}es.
  */
 export function walkAndRedact(
   obj: unknown,
@@ -87,7 +108,14 @@ export function walkAndRedact(
 }
 
 /**
- * Tries to parse a string as JSON. Returns parsed object or undefined.
+ * Attempts to parse a string as JSON.
+ *
+ * Uses a fast heuristic to skip non-JSON strings: the trimmed value must start
+ * with `{` and end with `}`, or start with `[` and end with `]`.
+ *
+ * @param value - The string to attempt to parse.
+ * @returns The parsed value, or `undefined` if parsing fails or the value
+ *   does not look like JSON.
  */
 function tryParseJson(value: string): unknown | undefined {
   // Quick heuristic: only try if it starts with { or [
@@ -106,9 +134,19 @@ function tryParseJson(value: string): unknown | undefined {
 }
 
 /**
- * Looks for a base64-encoded JSON body field in an object.
- * Checks if there's a Content-Type sibling indicating JSON and
- * a body-like field that looks like base64.
+ * Scans an object for a base64-encoded JSON body field.
+ *
+ * Returns the key name of the body field if all of the following are true:
+ * 1. The object contains a `content-type` / `contenttype` field whose value
+ *    includes `application/json`.
+ * 2. The object contains a field named `body`, `content`, `data`, or `payload`
+ *    whose value passes the {@link isLikelyBase64} heuristic.
+ *
+ * This is used to transparently redact request/response bodies that Playwright
+ * stores as base64 in trace files.
+ *
+ * @param obj - The object to inspect.
+ * @returns The key of the body field, or `undefined` if not detected.
  */
 function findBase64JsonBody(
   obj: Record<string, unknown>
@@ -141,7 +179,13 @@ function findBase64JsonBody(
 }
 
 /**
- * Heuristic check if a string looks like base64-encoded data.
+ * Heuristic check for whether a string looks like base64-encoded data.
+ *
+ * Considers a string base64 if it is at least 4 characters long and consists
+ * entirely of the base64 alphabet (`A-Za-z0-9+/`) with optional `=` padding.
+ *
+ * @param value - The string to test.
+ * @returns `true` if the value matches the base64 character set.
  */
 function isLikelyBase64(value: string): boolean {
   if (value.length < 4) return false;
@@ -150,7 +194,10 @@ function isLikelyBase64(value: string): boolean {
 }
 
 /**
- * Tries to decode a base64 string as JSON.
+ * Attempts to decode a base64 string and parse the result as JSON.
+ *
+ * @param value - A base64-encoded string (UTF-8 JSON content expected).
+ * @returns The parsed JSON value, or `undefined` if decoding or parsing fails.
  */
 function tryDecodeBase64Json(value: string): unknown | undefined {
   try {

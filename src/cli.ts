@@ -172,8 +172,26 @@ program.action(async (opts: Record<string, unknown>) => {
 });
 
 /**
- * Apply CLI flag overrides to the loaded config.
- * CLI flags take highest priority.
+ * Merges parsed CLI flag values into a {@link SanitizerConfig} object.
+ *
+ * CLI flags always take the highest priority — they overwrite any values
+ * that were loaded from a config file. Sections are created on-demand
+ * (e.g. `config.output` is initialised to `{}` if not already present).
+ *
+ * Flag → config field mapping:
+ * - `--report`         → `output.reportDir`
+ * - `--no-traces`      → `output.processTraces = false`
+ * - `--no-reports`     → `output.processReports = false`
+ * - `--output`         → `output.dir` + `output.mode = 'copy'`
+ * - `--in-place`       → `output.mode = 'in-place'`
+ * - `--patterns`       → `redact.patternFiles`
+ * - `--placeholder`    → `redact.placeholder`
+ * - `--dry-run`        → `remove.dryRun = true`
+ * - `--log-level`      → `reporting.logLevel`
+ * - `--summary-output` → `reporting.summaryFile`
+ *
+ * @param config - The config object to mutate (loaded from file or empty).
+ * @param opts   - Raw parsed options from Commander.js (`program.opts()`).
  */
 function applyCliOverrides(
   config: SanitizerConfig,
@@ -229,7 +247,12 @@ function applyCliOverrides(
 }
 
 /**
- * Finds files matching a glob pattern in a directory.
+ * Resolves a directory and returns all files matching a glob pattern.
+ * Returns an empty array (with an info log) if the directory does not exist.
+ *
+ * @param dir     - Directory to search in (absolute or relative to `cwd`).
+ * @param pattern - Glob pattern relative to `dir` (e.g. `'**\/*.html'`).
+ * @returns Absolute paths of all matching files.
  */
 async function findFiles(
   dir: string,
@@ -250,7 +273,16 @@ async function findFiles(
 }
 
 /**
- * Computes the output path for a file based on config output mode.
+ * Computes the destination path for a sanitized output file.
+ *
+ * - **`in-place`** / **`side-by-side`**: returns `inputPath` as-is.
+ * - **`copy`** *(default)*: mirrors the file's path relative to `sourceDir`
+ *   into the configured output directory (default: `'./sanitized-report'`).
+ *
+ * @param inputPath - Absolute path to the source file.
+ * @param sourceDir - Root directory used to compute the relative fragment.
+ * @param config    - The sanitizer configuration (read for `output.mode` and `output.dir`).
+ * @returns The computed output path.
  */
 function computeOutputPath(
   inputPath: string,

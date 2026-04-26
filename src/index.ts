@@ -40,8 +40,28 @@ export { loadPatternFile } from './redact/pattern-loader.js';
 export { loadRuleFile } from './remove/rule-loader.js';
 
 /**
- * Main entry point. Sanitizes Playwright reports and traces using
- * config file auto-discovery or the provided config object.
+ * Main programmatic entry point for `playwright-sanitizer`.
+ *
+ * Discovers (or uses the provided) configuration, then processes all matching
+ * HTML reports and trace `.zip` files found in the configured directories.
+ *
+ * Typical usage — run after a Playwright test suite from your own script:
+ * ```ts
+ * import { sanitize } from 'playwright-sanitizer';
+ *
+ * await sanitize({
+ *   redact: { patterns: [{ id: 'token', key: 'authorization' }] },
+ *   output: { mode: 'in-place' },
+ * });
+ * ```
+ *
+ * Config resolution (when `configOverride` is omitted):
+ * - Delegates to {@link loadConfig} which auto-discovers `playwright-sanitizer.config.ts`
+ *   (or the `sanitizer` key in `playwright.config.ts`).
+ *
+ * @param configOverride - Optional config object. When provided, skips file-based
+ *   config discovery entirely and uses this object directly.
+ * @returns Array of {@link ProcessResult}s — one entry per file processed.
  */
 export async function sanitize(
   configOverride?: SanitizerConfig
@@ -126,7 +146,25 @@ export async function sanitize(
 }
 
 /**
- * Process a single HTML report file.
+ * Sanitizes a single Playwright HTML report file.
+ *
+ * Convenience wrapper around {@link processHtmlReport} for cases where you
+ * need to process one specific file rather than an entire directory.
+ *
+ * @param reportPath - Absolute or relative path to the HTML report file.
+ * @param config     - The full sanitizer configuration to apply.
+ * @returns A {@link ProcessResult} with counts and match details for this file.
+ *
+ * @example
+ * ```ts
+ * import { redactReport } from 'playwright-sanitizer';
+ *
+ * const result = await redactReport('./playwright-report/index.html', {
+ *   redact: { patterns: [{ id: 'auth', key: 'authorization' }] },
+ *   output: { mode: 'copy', dir: './sanitized' },
+ * });
+ * console.log(`Redacted ${result.redactionsApplied} values`);
+ * ```
  */
 export async function redactReport(
   reportPath: string,
@@ -151,7 +189,25 @@ export async function redactReport(
 }
 
 /**
- * Process a single trace .zip file.
+ * Sanitizes a single Playwright trace `.zip` file.
+ *
+ * Convenience wrapper around {@link processTraceFile} for cases where you
+ * need to process one specific file rather than an entire directory.
+ *
+ * @param tracePath - Absolute or relative path to the trace `.zip` file.
+ * @param config    - The full sanitizer configuration to apply.
+ * @returns A {@link ProcessResult} with counts and match details for this file.
+ *
+ * @example
+ * ```ts
+ * import { redactTrace } from 'playwright-sanitizer';
+ *
+ * const result = await redactTrace('./test-results/my-test/trace.zip', {
+ *   redact: { patterns: [{ id: 'cookie', key: /^cookie$/i }] },
+ *   output: { mode: 'side-by-side' },
+ * });
+ * console.log(`Removed ${result.stepsRemoved} steps`);
+ * ```
  */
 export async function redactTrace(
   tracePath: string,
@@ -175,6 +231,14 @@ export async function redactTrace(
   return processTraceFile(tracePath, outputPath, config, patterns, rules);
 }
 
+/**
+ * Resolves a directory and returns all files matching a glob pattern.
+ * Returns an empty array (with an info log) if the directory does not exist.
+ *
+ * @param dir     - Directory to search in (absolute or relative to `cwd`).
+ * @param pattern - Glob pattern relative to `dir` (e.g. `'**\/*.html'`).
+ * @returns Absolute paths of all matching files.
+ */
 async function findFiles(
   dir: string,
   pattern: string
@@ -188,6 +252,18 @@ async function findFiles(
   return glob(pattern, { cwd: resolvedDir, absolute: true });
 }
 
+/**
+ * Computes the destination path for a sanitized output file.
+ *
+ * - **`in-place`** / **`side-by-side`**: returns `inputPath` as-is
+ *   (the write functions handle the side-by-side renaming separately).
+ * - **`copy`**: mirrors `inputPath` relative to `sourceDir` into the output directory.
+ *
+ * @param inputPath - Absolute path to the source file.
+ * @param sourceDir - Root directory used to compute the relative path fragment.
+ * @param config    - The full sanitizer configuration (read for `output.mode` and `output.dir`).
+ * @returns The computed output path.
+ */
 function computeOutputPath(
   inputPath: string,
   sourceDir: string,

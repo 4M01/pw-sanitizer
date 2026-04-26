@@ -3,6 +3,10 @@ import * as path from 'node:path';
 import type { RemoveRule } from '../config/types.js';
 import { logger } from '../logger.js';
 
+/**
+ * Thrown when a rule file path listed in `remove.ruleFiles` cannot be
+ * resolved or loaded.
+ */
 export class RuleFileNotFoundError extends Error {
   constructor(filePath: string) {
     super(`remove.ruleFiles: file not found: ${filePath}`);
@@ -11,11 +15,19 @@ export class RuleFileNotFoundError extends Error {
 }
 
 /**
- * Load remove rules from an external file (.ts, .js, or .json).
+ * Loads an array of {@link RemoveRule}s from an external file.
  *
- * - .json files are loaded via JSON.parse (no RegExp support; strings matched as substrings)
- * - .ts/.js files are loaded via dynamic import()
- * - If a .ts file fails to import, tries a .js sibling
+ * Supported formats:
+ * - **`.json`** — parsed with `JSON.parse`; RegExp values are not supported.
+ *   String matchers are evaluated as case-sensitive substring matches.
+ * - **`.ts` / `.js`** — loaded via dynamic `import()`; the file must export a
+ *   default array of {@link RemoveRule} objects (supports `RegExp` fields).
+ *   If a `.ts` file fails to import (e.g. no `tsx` / `ts-node` available),
+ *   a compiled `.js` sibling at the same path is tried automatically.
+ *
+ * @param filePath - Absolute or relative path to the rule file.
+ * @returns Array of {@link RemoveRule}s defined in the file.
+ * @throws {@link RuleFileNotFoundError} if the file does not exist or cannot be loaded.
  */
 export async function loadRuleFile(filePath: string): Promise<RemoveRule[]> {
   const absolutePath = path.resolve(filePath);

@@ -2,17 +2,29 @@ import type { TraceEvent, TimestampStrategy } from '../config/types.js';
 import { logger } from '../logger.js';
 
 /**
- * Repairs timestamps after step removal using the specified strategy.
+ * Repairs the event timeline after steps have been removed, so that the total
+ * duration reported in the Playwright UI remains coherent.
  *
- * Given: ordered events array, set of removed events, strategy
- * Processes removals in reverse index order so preceding indices stay valid.
+ * For each removed event, the duration (`endTime - startTime`) that it occupied
+ * is redistributed to an adjacent event according to the chosen strategy:
  *
- * Strategies:
- * - 'absorb-into-prev': preceding step's endTime absorbs the deleted duration
- * - 'absorb-into-next': following step's startTime is shifted back
- * - 'gap': timestamps are not adjusted; a gap appears in the timeline
+ * - **`'absorb-into-prev'`** *(default)*: the preceding event's `endTime` is
+ *   extended by the removed duration. Falls back to shifting the following
+ *   event's `startTime` if no preceding event exists.
+ * - **`'absorb-into-next'`**: the following event's `startTime` is shifted
+ *   back by the removed duration. Falls back to extending the preceding
+ *   event if no following event exists.
+ * - **`'gap'`**: no adjustment — a visible gap will appear in the timeline.
  *
- * Returns a new array (never mutates input).
+ * After redistribution, events where `startTime > endTime` are detected and
+ * corrected (a warning is emitted for each such case).
+ *
+ * The input arrays are **never mutated** — a new events array is returned.
+ *
+ * @param events        - The events array **after** step removal (output of {@link removeSteps}).
+ * @param removedEvents - The events that were removed (needed to determine their durations).
+ * @param strategy      - The {@link TimestampStrategy} to apply.
+ * @returns A new array of events with adjusted timestamps.
  */
 export function repairTimestamps(
   events: TraceEvent[],
@@ -51,6 +63,17 @@ export function repairTimestamps(
   return recomputeSuiteTimes(result);
 }
 
+/**
+ * Applies a single timestamp redistribution for one removed event.
+ *
+ * Mutates the `events` array in place (only called on a cloned copy inside
+ * {@link repairTimestamps}).
+ *
+ * @param events   - Shallow-cloned events array to mutate.
+ * @param removed  - The event that was deleted.
+ * @param duration - The duration (`endTime - startTime`) of the removed event in ms.
+ * @param strategy - Which adjacent event should absorb the duration.
+ */
 function applyStrategy(
   events: TraceEvent[],
   removed: TraceEvent,
@@ -84,7 +107,14 @@ function applyStrategy(
 }
 
 /**
- * Find the event whose endTime is closest to and <= the given time.
+ * Finds the event whose `endTime` is closest to (and no greater than) `time`.
+ *
+ * Used by the `'absorb-into-prev'` strategy to locate the last event that
+ * finished at or before the start of the removed event.
+ *
+ * @param events - The list of remaining events.
+ * @param time   - The reference timestamp (`removedEvent.startTime`).
+ * @returns The best preceding event, or `undefined` if none qualifies.
  */
 function findPrecedingEvent(
   events: TraceEvent[],
@@ -105,7 +135,14 @@ function findPrecedingEvent(
 }
 
 /**
- * Find the event whose startTime is closest to and >= the given time.
+ * Finds the event whose `startTime` is closest to (and no less than) `time`.
+ *
+ * Used by the `'absorb-into-next'` strategy to locate the first event that
+ * starts at or after the end of the removed event.
+ *
+ * @param events - The list of remaining events.
+ * @param time   - The reference timestamp (`removedEvent.endTime`).
+ * @returns The best following event, or `undefined` if none qualifies.
  */
 function findFollowingEvent(
   events: TraceEvent[],
@@ -126,7 +163,14 @@ function findFollowingEvent(
 }
 
 /**
- * Recompute suite-level startTime and endTime from remaining events.
+ * Placeholder for suite-level timestamp recomputation.
+ *
+ * Suite-level `startTime` / `endTime` aggregation is handled by the Playwright
+ * report viewer from the leaf event timestamps; callers may perform their own
+ * recomputation after this function returns.
+ *
+ * @param events - The events array (returned as-is for empty arrays).
+ * @returns The same events array.
  */
 function recomputeSuiteTimes(events: TraceEvent[]): TraceEvent[] {
   // Nothing to recompute if empty
