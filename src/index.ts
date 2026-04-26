@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { glob } from 'glob';
+import { findFiles, computeOutputPath } from './utils.js';
 import type { SanitizerConfig, ProcessResult } from './config/types.js';
 import { loadConfig } from './config/loader.js';
 import { validateConfig } from './config/validator.js';
@@ -231,51 +231,4 @@ export async function redactTrace(
   return processTraceFile(tracePath, outputPath, config, patterns, rules);
 }
 
-/**
- * Resolves a directory and returns all files matching a glob pattern.
- * Returns an empty array (with an info log) if the directory does not exist.
- *
- * @param dir     - Directory to search in (absolute or relative to `cwd`).
- * @param pattern - Glob pattern relative to `dir` (e.g. `'**\/*.html'`).
- * @returns Absolute paths of all matching files.
- */
-async function findFiles(
-  dir: string,
-  pattern: string
-): Promise<string[]> {
-  const resolvedDir = path.resolve(dir);
-  if (!fs.existsSync(resolvedDir)) {
-    logger.info(`Directory not found: ${resolvedDir}`);
-    return [];
-  }
 
-  return glob(pattern, { cwd: resolvedDir, absolute: true });
-}
-
-/**
- * Computes the destination path for a sanitized output file.
- *
- * - **`in-place`** / **`side-by-side`**: returns `inputPath` as-is
- *   (the write functions handle the side-by-side renaming separately).
- * - **`copy`**: mirrors `inputPath` relative to `sourceDir` into the output directory.
- *
- * @param inputPath - Absolute path to the source file.
- * @param sourceDir - Root directory used to compute the relative path fragment.
- * @param config    - The full sanitizer configuration (read for `output.mode` and `output.dir`).
- * @returns The computed output path.
- */
-function computeOutputPath(
-  inputPath: string,
-  sourceDir: string,
-  config: SanitizerConfig
-): string {
-  const mode = config.output?.mode ?? 'copy';
-
-  if (mode === 'in-place' || mode === 'side-by-side') {
-    return inputPath;
-  }
-
-  const outputDir = config.output?.dir ?? './sanitized-report';
-  const relative = path.relative(path.resolve(sourceDir), inputPath);
-  return path.resolve(outputDir, relative);
-}

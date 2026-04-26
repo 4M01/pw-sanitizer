@@ -13,6 +13,7 @@ import { findStepsToRemove } from '../remove/detector.js';
 import { removeSteps } from '../remove/remover.js';
 import { repairTimestamps } from '../remove/timestamp-repair.js';
 import { logger } from '../logger.js';
+import { writeOutput } from '../utils.js';
 
 /**
  * Sanitizes a single Playwright trace `.zip` file.
@@ -254,40 +255,4 @@ export async function processTraceFile(
   return result;
 }
 
-/**
- * Writes a sanitized ZIP buffer to disk according to the configured output mode.
- *
- * - **`in-place`**: overwrites the original file at `inputPath`.
- * - **`side-by-side`**: writes `<basename>.sanitized<ext>` next to the original.
- * - **`copy`** *(default)*: mirrors the file into `outputPath`, creating parent dirs as needed.
- *
- * @param inputPath  - Absolute path to the original file (used for `in-place` and `side-by-side`).
- * @param outputPath - Computed destination path (used for `copy` mode).
- * @param content    - The sanitized ZIP buffer to write.
- * @param config     - The full sanitizer configuration (read for `output.mode`).
- */
-function writeOutput(
-  inputPath: string,
-  outputPath: string,
-  content: Buffer,
-  config: SanitizerConfig
-): void {
-  const mode = config.output?.mode ?? 'copy';
 
-  if (mode === 'in-place') {
-    fs.writeFileSync(inputPath, content);
-    logger.verbose(`Wrote in-place: ${inputPath}`);
-  } else if (mode === 'side-by-side') {
-    const ext = path.extname(inputPath);
-    const base = inputPath.slice(0, -ext.length);
-    const sidePath = `${base}.sanitized${ext}`;
-    fs.writeFileSync(sidePath, content);
-    logger.verbose(`Wrote side-by-side: ${sidePath}`);
-  } else {
-    // 'copy' mode
-    const dir = path.dirname(outputPath);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(outputPath, content);
-    logger.verbose(`Wrote copy: ${outputPath}`);
-  }
-}

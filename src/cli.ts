@@ -1,23 +1,9 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import { glob } from 'glob';
 import type { SanitizerConfig } from './config/types.js';
 import { loadConfig } from './config/loader.js';
-import { validateConfig } from './config/validator.js';
-import { buildPatternRegistry } from './redact/pattern-registry.js';
-import { buildRuleRegistry } from './remove/rule-registry.js';
-import { processHtmlReport } from './processors/html-report.js';
-import { processTraceFile } from './processors/trace-file.js';
-import {
-  generateSummary,
-  printSummary,
-  writeSummaryFile,
-} from './reporter.js';
-import { configureLogger, logger } from './logger.js';
-import type { ProcessResult } from './config/types.js';
+import { sanitize } from './index.js';
 
 const program = new Command();
 
@@ -70,95 +56,7 @@ program.action(async (opts: Record<string, unknown>) => {
     // Apply CLI overrides
     applyCliOverrides(config, opts);
 
-    // Configure logger
-    configureLogger(config.reporting);
-
-    // Validate
-    validateConfig(config);
-
-    // Warn about in-place mode
-    if (config.output?.mode === 'in-place') {
-      logger.warn(
-        'in-place mode overwrites originals — ensure files are version-controlled.'
-      );
-    }
-
-    // Build pattern and rule registries
-    const patterns = config.redact
-      ? await buildPatternRegistry(config.redact)
-      : [];
-    const rules = config.remove
-      ? await buildRuleRegistry(config.remove)
-      : [];
-
-    const results: ProcessResult[] = [];
-
-    // Process HTML reports
-    const processReports = config.output?.processReports !== false;
-    if (processReports) {
-      const reportDir =
-        config.output?.reportDir ?? './playwright-report';
-      const reportFiles = await findFiles(reportDir, '**/*.html');
-
-      for (const file of reportFiles) {
-        const outputPath = computeOutputPath(
-          file,
-          reportDir,
-          config
-        );
-        const result = await processHtmlReport(
-          file,
-          outputPath,
-          config,
-          patterns,
-          rules
-        );
-        results.push(result);
-      }
-    }
-
-    // Process trace files
-    const processTraces = config.output?.processTraces !== false;
-    if (processTraces) {
-      const traceDir = config.output?.traceDir ?? './test-results';
-      const traceFiles = await findFiles(traceDir, '**/*.zip');
-
-      for (const file of traceFiles) {
-        const outputPath = computeOutputPath(
-          file,
-          traceDir,
-          config
-        );
-        const result = await processTraceFile(
-          file,
-          outputPath,
-          config,
-          patterns,
-          rules
-        );
-        results.push(result);
-      }
-    }
-
-    // Generate summary
-    const showSummary = config.reporting?.summary !== false;
-    if (showSummary || config.reporting?.summaryFile) {
-      const summary = generateSummary(
-        results,
-        config,
-        patterns.length,
-        rules.length,
-        [] // Safety warnings are collected during processing via logger
-      );
-
-      if (showSummary) {
-        printSummary(summary);
-      }
-
-      if (config.reporting?.summaryFile) {
-        writeSummaryFile(summary, config.reporting.summaryFile);
-      }
-    }
+    await sanitize(config);
 
     process.exit(0);
   } catch (err) {
@@ -246,59 +144,6 @@ function applyCliOverrides(
   }
 }
 
-/**
- * Resolves a directory and returns all files matching a glob pattern.
- * Returns an empty array (with an info log) if the directory does not exist.
- *
- * @param dir     - Directory to search in (absolute or relative to `cwd`).
- * @param pattern - Glob pattern relative to `dir` (e.g. `'**\/*.html'`).
- * @returns Absolute paths of all matching files.
- */
-async function findFiles(
-  dir: string,
-  pattern: string
-): Promise<string[]> {
-  const resolvedDir = path.resolve(dir);
-  if (!fs.existsSync(resolvedDir)) {
-    logger.info(`Directory not found: ${resolvedDir}`);
-    return [];
-  }
 
-  const files = await glob(pattern, {
-    cwd: resolvedDir,
-    absolute: true,
-  });
-
-  return files;
-}
-
-/**
- * Computes the destination path for a sanitized output file.
- *
- * - **`in-place`** / **`side-by-side`**: returns `inputPath` as-is.
- * - **`copy`** *(default)*: mirrors the file's path relative to `sourceDir`
- *   into the configured output directory (default: `'./sanitized-report'`).
- *
- * @param inputPath - Absolute path to the source file.
- * @param sourceDir - Root directory used to compute the relative fragment.
- * @param config    - The sanitizer configuration (read for `output.mode` and `output.dir`).
- * @returns The computed output path.
- */
-function computeOutputPath(
-  inputPath: string,
-  sourceDir: string,
-  config: SanitizerConfig
-): string {
-  const mode = config.output?.mode ?? 'copy';
-
-  if (mode === 'in-place' || mode === 'side-by-side') {
-    return inputPath;
-  }
-
-  // 'copy' mode: mirror the structure into output dir
-  const outputDir = config.output?.dir ?? './sanitized-report';
-  const relative = path.relative(path.resolve(sourceDir), inputPath);
-  return path.resolve(outputDir, relative);
-}
 
 program.parse();

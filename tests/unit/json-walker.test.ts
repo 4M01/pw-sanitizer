@@ -349,44 +349,7 @@ describe('walkAndRedact', () => {
     });
   });
 
-  // ── 8. Returns new object (does not mutate input) ─────────────────────
 
-  describe('immutability', () => {
-    it('does not mutate the original input object', () => {
-      const input = {
-        authorization: 'Bearer token123',
-        nested: { password: 'secret' },
-      };
-
-      // Deep-clone for comparison
-      const originalSnapshot = JSON.parse(JSON.stringify(input));
-
-      walkAndRedact(input, [authPattern, passwordPattern], defaultConfig);
-
-      // The original must be unchanged
-      expect(input).toEqual(originalSnapshot);
-      expect(input.authorization).toBe('Bearer token123');
-      expect(input.nested.password).toBe('secret');
-    });
-
-    it('returns a distinct object reference', () => {
-      const input = { key: 'value' };
-
-      const { result } = walkAndRedact(input, [], defaultConfig);
-
-      expect(result).not.toBe(input);
-      expect(result).toEqual(input);
-    });
-
-    it('does not mutate nested arrays', () => {
-      const input = [{ password: 'abc' }, { password: 'def' }];
-      const originalSnapshot = JSON.parse(JSON.stringify(input));
-
-      walkAndRedact(input, [passwordPattern], defaultConfig);
-
-      expect(input).toEqual(originalSnapshot);
-    });
-  });
 
   // ── 9. Base64-encoded JSON body ────────────────────────────────────────
 

@@ -45,21 +45,42 @@ export function walkAndRedact(
     }
 
     if (Array.isArray(node)) {
-      return node.map((item, index) => walk(item, `${keyPath}[${index}]`));
+      // Mutate array in place to save memory
+      for (let i = 0; i < node.length; i++) {
+        node[i] = walk(node[i], `${keyPath}[${i}]`);
+      }
+      return node;
     }
 
     if (typeof node === 'object') {
-      const obj = node as Record<string, unknown>;
-      const result: Record<string, unknown> = {};
+      const objNode = node as Record<string, unknown>;
+      let hasJsonContentType = false;
+      const bodyKeys: string[] = [];
 
-      for (const [key, value] of Object.entries(obj)) {
+      for (const [key, value] of Object.entries(objNode)) {
         const currentPath = keyPath ? `${keyPath}.${key}` : key;
+        const keyLower = key.toLowerCase();
+
+        // Check for content-type indicating JSON
+        if (
+          (keyLower === 'content-type' || keyLower === 'contenttype') &&
+          typeof value === 'string' &&
+          value.toLowerCase().includes('application/json')
+        ) {
+          hasJsonContentType = true;
+        } else if (
+          ['body', 'content', 'data', 'payload'].includes(keyLower) &&
+          typeof value === 'string' &&
+          isLikelyBase64(value)
+        ) {
+          bodyKeys.push(key);
+        }
 
         if (typeof value === 'string') {
           // Try to redact the string value
           const redactionResult = redactValue(key, value, patterns, config);
           if (redactionResult.redacted) {
-            result[key] = redactionResult.value;
+            objNode[key] = redactionResult.value;
             count++;
             matches.push({
               keyPath: currentPath,
@@ -70,34 +91,35 @@ export function walkAndRedact(
             const parsed = tryParseJson(value);
             if (parsed !== undefined) {
               const innerResult = walk(parsed, currentPath);
-              result[key] = JSON.stringify(innerResult);
-            } else {
-              result[key] = value;
+              objNode[key] = JSON.stringify(innerResult);
+            }
+            // else string remains unchanged
+          }
+        } else if (typeof value === 'object' && value !== null) {
+          // Recurse into nested objects/arrays
+          objNode[key] = walk(value, currentPath);
+        }
+        // Booleans and numbers remain unchanged
+      }
+
+      // Handle base64-encoded JSON bodies
+      if (hasJsonContentType && bodyKeys.length > 0) {
+        for (const bodyKey of bodyKeys) {
+          const bodyValue = objNode[bodyKey];
+          if (typeof bodyValue === 'string') {
+            const decoded = tryDecodeBase64Json(bodyValue);
+            if (decoded !== undefined) {
+              const innerPath = keyPath ? `${keyPath}.${bodyKey}` : bodyKey;
+              const redacted = walk(decoded, innerPath);
+              objNode[bodyKey] = Buffer.from(
+                JSON.stringify(redacted)
+              ).toString('base64');
             }
           }
-        } else if (typeof value === 'number' || typeof value === 'boolean') {
-          result[key] = value;
-        } else {
-          // Recurse into nested objects/arrays
-          result[key] = walk(value, currentPath);
         }
       }
 
-      // Handle base64-encoded JSON bodies:
-      // If there's a content-type-like key indicating JSON, and a body-like key that's base64
-      const bodyKey = findBase64JsonBody(obj);
-      if (bodyKey && typeof result[bodyKey] === 'string') {
-        const decoded = tryDecodeBase64Json(result[bodyKey] as string);
-        if (decoded !== undefined) {
-          const innerPath = keyPath ? `${keyPath}.${bodyKey}` : bodyKey;
-          const redacted = walk(decoded, innerPath);
-          result[bodyKey] = Buffer.from(
-            JSON.stringify(redacted)
-          ).toString('base64');
-        }
-      }
-
-      return result;
+      return objNode;
     }
 
     return node;
@@ -133,50 +155,7 @@ function tryParseJson(value: string): unknown | undefined {
   return undefined;
 }
 
-/**
- * Scans an object for a base64-encoded JSON body field.
- *
- * Returns the key name of the body field if all of the following are true:
- * 1. The object contains a `content-type` / `contenttype` field whose value
- *    includes `application/json`.
- * 2. The object contains a field named `body`, `content`, `data`, or `payload`
- *    whose value passes the {@link isLikelyBase64} heuristic.
- *
- * This is used to transparently redact request/response bodies that Playwright
- * stores as base64 in trace files.
- *
- * @param obj - The object to inspect.
- * @returns The key of the body field, or `undefined` if not detected.
- */
-function findBase64JsonBody(
-  obj: Record<string, unknown>
-): string | undefined {
-  // Check for content-type indicating JSON
-  const hasJsonContentType = Object.entries(obj).some(([key, value]) => {
-    const keyLower = key.toLowerCase();
-    return (
-      (keyLower === 'content-type' || keyLower === 'contenttype') &&
-      typeof value === 'string' &&
-      value.toLowerCase().includes('application/json')
-    );
-  });
 
-  if (!hasJsonContentType) return undefined;
-
-  // Look for a body-like field that could be base64
-  const bodyKeys = ['body', 'content', 'data', 'payload'];
-  for (const key of Object.keys(obj)) {
-    if (
-      bodyKeys.includes(key.toLowerCase()) &&
-      typeof obj[key] === 'string' &&
-      isLikelyBase64(obj[key] as string)
-    ) {
-      return key;
-    }
-  }
-
-  return undefined;
-}
 
 /**
  * Heuristic check for whether a string looks like base64-encoded data.
