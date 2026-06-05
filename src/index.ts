@@ -125,12 +125,13 @@ export async function sanitize(
   // Summary
   const showSummary = config.reporting?.summary !== false;
   if (showSummary || config.reporting?.summaryFile) {
+    const allSafetyWarnings = results.flatMap((r) => r.safetyGuardWarnings);
     const summary = generateSummary(
       results,
       config,
       patterns.length,
       rules.length,
-      []
+      allSafetyWarnings
     );
 
     if (showSummary) {

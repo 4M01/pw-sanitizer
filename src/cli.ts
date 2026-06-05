@@ -4,6 +4,9 @@ import { Command } from 'commander';
 import type { SanitizerConfig } from './config/types.js';
 import { loadConfig } from './config/loader.js';
 import { sanitize } from './index.js';
+// resolveJsonModule: true in tsconfig.json enables this JSON import.
+// TypeScript will type `version` as `string` from the package.json schema.
+import pkg from '../package.json';
 
 const program = new Command();
 
@@ -12,7 +15,7 @@ program
   .description(
     'Post-process Playwright HTML reports and trace files to redact secrets and remove noisy steps'
   )
-  .version('0.1.0')
+  .version(pkg.version)
   .option('-c, --config <path>', 'Path to config file')
   .option(
     '-r, --report <path>',
@@ -70,7 +73,7 @@ program.action(async (opts: Record<string, unknown>) => {
 });
 
 /**
- * Merges parsed CLI flag values into a {@link SanitizerConfig} object.
+ * Exported for unit testing. Merges parsed CLI flag values into a {@link SanitizerConfig} object.
  *
  * CLI flags always take the highest priority — they overwrite any values
  * that were loaded from a config file. Sections are created on-demand
@@ -91,7 +94,7 @@ program.action(async (opts: Record<string, unknown>) => {
  * @param config - The config object to mutate (loaded from file or empty).
  * @param opts   - Raw parsed options from Commander.js (`program.opts()`).
  */
-function applyCliOverrides(
+export function applyCliOverrides(
   config: SanitizerConfig,
   opts: Record<string, unknown>
 ): void {
@@ -146,4 +149,10 @@ function applyCliOverrides(
 
 
 
-program.parse();
+// Only parse when this file is the Node.js entry-point, not when it is imported
+// by a test or another module. The CJS `require.main === module` idiom is the
+// standard pattern for this in CommonJS (which is what `module: Node16` compiles
+// to when package.json has no `"type": "module"` field).
+if (require.main === module) {
+  program.parse();
+}
