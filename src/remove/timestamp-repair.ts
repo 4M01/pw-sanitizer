@@ -163,19 +163,59 @@ function findFollowingEvent(
 }
 
 /**
- * Placeholder for suite-level timestamp recomputation.
+ * Recomputes parent-event time spans so they correctly enclose all remaining
+ * children after step removal.
  *
- * Suite-level `startTime` / `endTime` aggregation is handled by the Playwright
- * report viewer from the leaf event timestamps; callers may perform their own
- * recomputation after this function returns.
+ * Algorithm:
+ * 1. Build a `callId → event` index for O(1) parent lookup.
+ * 2. Iterate in passes: for each event that has a `parentId`, extend the
+ *    parent's `startTime` / `endTime` to cover the child's range.
+ * 3. Repeat until no further changes occur (handles arbitrary nesting depth),
+ *    capped at {@link MAX_RECOMPUTE_PASSES} to guard against cycles.
  *
- * @param events - The events array (returned as-is for empty arrays).
- * @returns The same events array.
+ * The function mutates the events **in-place** — callers must pass a cloned
+ * array if immutability is required (the non-`gap` path in {@link repairTimestamps}
+ * always does this via `events.map(e => ({ ...e }))`).
+ *
+ * @param events - The events array to update (may be mutated).
+ * @returns The same array with corrected parent time spans.
  */
 function recomputeSuiteTimes(events: TraceEvent[]): TraceEvent[] {
-  // Nothing to recompute if empty
   if (events.length === 0) return events;
 
-  // Suite-level times will be recomputed by callers if needed
+  // Index callId → event for fast parent lookup
+  const byCallId = new Map<string, TraceEvent>();
+  for (const event of events) {
+    if (event.callId) {
+      byCallId.set(event.callId, event);
+    }
+  }
+
+  // Iteratively bubble child time ranges up to parents
+  const MAX_RECOMPUTE_PASSES = 16;
+  let changed = true;
+  let passes = 0;
+
+  while (changed && passes < MAX_RECOMPUTE_PASSES) {
+    changed = false;
+    passes++;
+
+    for (const event of events) {
+      if (!event.parentId) continue;
+
+      const parent = byCallId.get(event.parentId);
+      if (!parent) continue;
+
+      if (event.startTime < parent.startTime) {
+        parent.startTime = event.startTime;
+        changed = true;
+      }
+      if (event.endTime > parent.endTime) {
+        parent.endTime = event.endTime;
+        changed = true;
+      }
+    }
+  }
+
   return events;
 }

@@ -426,6 +426,11 @@ export interface RemovalSet {
   indices: Set<number>;
   /** Detailed list of every match (one entry per step per rule). */
   matches: StepMatch[];
+  /**
+   * Safety-guard warning messages emitted when a rule's
+   * `minConsecutiveOccurrences` threshold was not met.
+   */
+  safetyGuardWarnings: string[];
 }
 
 /**
@@ -444,6 +449,11 @@ export interface ProcessResult {
   redactionMatches: RedactionMatch[];
   /** Detailed list of every step-removal match. */
   removalMatches: StepMatch[];
+  /**
+   * Safety-guard warning messages collected while processing this file.
+   * Populated when a rule's `minConsecutiveOccurrences` threshold was not met.
+   */
+  safetyGuardWarnings: string[];
 }
 
 /**

@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import JSZip from 'jszip';
 import { processTraceFile } from '../../src/processors/trace-file.js';
 import type {
@@ -232,7 +232,194 @@ describe('processTraceFile (integration)', () => {
     });
   });
 
-  // ── 4. Unreadable zip ─────────────────────────────────────────────────────
+  // ── 4. orphanStrategy: keep-shell ────────────────────────────────────────
+
+  describe("orphanStrategy: 'keep-shell'", () => {
+    it('keeps matched parent events and removes only their children from trace.json', async () => {
+      // Build a trace with a parent step that has a child step
+      const eventsWithChildren = [
+        {
+          title: 'login',
+          startTime: 0,
+          endTime: 200,
+          callId: 'parent1',
+          actionType: 'locator.click',
+        },
+        {
+          title: 'locator.fill',
+          startTime: 10,
+          endTime: 100,
+          parentId: 'parent1',
+          callId: 'child1',
+          selector: '#password',
+          actionType: 'locator.fill',
+        },
+        {
+          title: 'locator.click',
+          startTime: 100,
+          endTime: 200,
+          parentId: 'parent1',
+          callId: 'child2',
+          actionType: 'locator.click',
+        },
+        {
+          title: 'page.goto',
+          startTime: 200,
+          endTime: 300,
+          callId: 'other1',
+          actionType: 'page.goto',
+        },
+      ];
+
+      const dir = createTmpDir();
+      const zipPath = path.join(dir, 'trace.zip');
+      fs.writeFileSync(zipPath, await buildFixtureZip(eventsWithChildren, []));
+
+      // Rule matches the parent "login" step
+      const rules: RemoveRule[] = [{ label: 'strip-login-detail', stepName: 'login' }];
+      const config: SanitizerConfig = {
+        ...inPlaceConfig,
+        remove: { orphanStrategy: 'keep-shell' },
+      };
+
+      const result = await processTraceFile(zipPath, zipPath, config, [], rules);
+
+      const trace = (await readJsonFromZip(zipPath, 'trace.json')) as Array<{
+        callId?: string;
+        title?: string;
+      }>;
+
+      // Parent "login" must still be present
+      expect(trace.some((e) => e.callId === 'parent1')).toBe(true);
+
+      // Both children must be removed
+      expect(trace.some((e) => e.callId === 'child1')).toBe(false);
+      expect(trace.some((e) => e.callId === 'child2')).toBe(false);
+
+      // Unrelated step must still be present
+      expect(trace.some((e) => e.callId === 'other1')).toBe(true);
+
+      // stepsRemoved should count the children that were actually removed
+      expect(result.stepsRemoved).toBe(2);
+    });
+
+    it('removes nothing extra when matched step has no children', async () => {
+      const dir = createTmpDir();
+      const zipPath = path.join(dir, 'trace.zip');
+      fs.writeFileSync(zipPath, await buildFixtureZip(traceEvents, networkEntries));
+
+      const rules: RemoveRule[] = [{ label: 'remove-fill', stepName: 'locator.fill' }];
+      const config: SanitizerConfig = {
+        ...inPlaceConfig,
+        remove: { orphanStrategy: 'keep-shell' },
+      };
+
+      const result = await processTraceFile(zipPath, zipPath, config, [], rules);
+
+      // The fill step (c3) has no children — keep-shell keeps it
+      const trace = (await readJsonFromZip(zipPath, 'trace.json')) as Array<{
+        callId?: string;
+      }>;
+      expect(trace.some((e) => e.callId === 'c3')).toBe(true);
+
+      // Nothing was removed
+      expect(result.stepsRemoved).toBe(0);
+    });
+  });
+
+  // ── 5. Screenshot redaction ───────────────────────────────────────────────
+
+  describe('screenshot redaction', () => {
+    /**
+     * Builds a trace zip that includes a PNG screenshot in resources/
+     * and a trace event with a `box` bounding-box field.
+     */
+    async function buildZipWithScreenshot(): Promise<{ zip: JSZip; pngBuffer: Buffer }> {
+      // Minimal 1×1 pixel PNG (valid binary)
+      const pngBuffer = Buffer.from(
+        '89504e470d0a1a0a0000000d49484452000000010000000108020000' +
+          '0090wc3d00000000c4944415478016360f8cfc00000000200' +
+          '01e221bc330000000049454e44ae426082',
+        'hex'
+      );
+
+      const zip = new JSZip();
+      zip.file('trace.json', JSON.stringify([
+        {
+          title: 'locator.fill',
+          startTime: 0,
+          endTime: 100,
+          callId: 'c1',
+          selector: '#password',
+          // Playwright records the element bounding box for UI actions
+          box: { x: 10, y: 20, width: 100, height: 30 },
+        },
+      ]));
+      zip.file('network.json', JSON.stringify([]));
+      zip.file('resources/screenshot-001.png', pngBuffer);
+
+      return { zip, pngBuffer };
+    }
+
+    it('does not throw and processes the zip when redactScreenshots is true (sharp absent → no-op)', async () => {
+      const dir = createTmpDir();
+      const zipPath = path.join(dir, 'trace.zip');
+
+      const { zip, pngBuffer } = await buildZipWithScreenshot();
+      const zipBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+      fs.writeFileSync(zipPath, zipBuf);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const config: SanitizerConfig = {
+        ...inPlaceConfig,
+        remove: { rules: [{ label: 'noop', stepName: '__no_match__' }] },
+        output: { ...inPlaceConfig.output, redactScreenshots: true },
+      };
+
+      // Should complete without throwing even though sharp is not installed
+      const result = await processTraceFile(zipPath, zipPath, config, [], []);
+
+      // Result counts are zero (no redactions/removals triggered)
+      expect(result.redactionsApplied).toBe(0);
+      expect(result.stepsRemoved).toBe(0);
+
+      // The screenshot file should still exist in the output zip (unmodified since sharp absent)
+      const outZip = await JSZip.loadAsync(fs.readFileSync(zipPath));
+      const screenshotFile = outZip.file('resources/screenshot-001.png');
+      expect(screenshotFile).not.toBeNull();
+
+      warnSpy.mockRestore();
+    });
+
+    it('skips screenshot processing gracefully when no bounding boxes exist in trace events', async () => {
+      const dir = createTmpDir();
+      const zipPath = path.join(dir, 'trace.zip');
+
+      // Trace with no `box` fields on events
+      const zip = new JSZip();
+      zip.file('trace.json', JSON.stringify([
+        { title: 'page.goto', startTime: 0, endTime: 100, callId: 'c1' },
+      ]));
+      zip.file('network.json', JSON.stringify([]));
+      zip.file('resources/screenshot.png', Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      const zipBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+      fs.writeFileSync(zipPath, zipBuf);
+
+      const verboseSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const config: SanitizerConfig = {
+        ...inPlaceConfig,
+        output: { ...inPlaceConfig.output, redactScreenshots: true },
+      };
+
+      await expect(processTraceFile(zipPath, zipPath, config, [], [])).resolves.not.toThrow();
+
+      verboseSpy.mockRestore();
+    });
+  });
+
+  // ── 6. Unreadable zip ─────────────────────────────────────────────────────
 
   describe('error handling', () => {
     it('returns an empty result and does not throw when the zip file is unreadable', async () => {

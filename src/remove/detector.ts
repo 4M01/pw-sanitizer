@@ -123,6 +123,7 @@ export function findStepsToRemove(
 ): RemovalSet {
   const indices = new Set<number>();
   const matches: StepMatch[] = [];
+  const safetyGuardWarnings: string[] = [];
 
   for (const rule of rules) {
     if (rule.minConsecutiveOccurrences !== undefined) {
@@ -142,11 +143,12 @@ export function findStepsToRemove(
           }
         } else {
           // Threshold NOT met — warn and skip this entire run
-          logger.warn(
+          const warningMsg =
             `Rule "${rule.label}" matched ${run.length} consecutive occurrences ` +
             `but minConsecutiveOccurrences is ${rule.minConsecutiveOccurrences}. ` +
-            `Skipping removal. Review your rule.`
-          );
+            `Skipping removal. Review your rule.`;
+          logger.warn(warningMsg);
+          safetyGuardWarnings.push(warningMsg);
         }
       }
     } else {
@@ -165,5 +167,5 @@ export function findStepsToRemove(
     }
   }
 
-  return { indices, matches };
+  return { indices, matches, safetyGuardWarnings };
 }
