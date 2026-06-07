@@ -60,7 +60,7 @@ Object.defineProperty(exports, "loadRuleFile", { enumerable: true, get: function
  *
  * Typical usage — run after a Playwright test suite from your own script:
  * ```ts
- * import { sanitize } from 'playwright-sanitizer';
+ * import { sanitize } from 'pw-sanitizer';
  *
  * await sanitize({
  *   redact: { patterns: [{ id: 'token', key: 'authorization' }] },
@@ -113,7 +113,8 @@ async function sanitize(configOverride) {
     // Summary
     const showSummary = config.reporting?.summary !== false;
     if (showSummary || config.reporting?.summaryFile) {
-        const summary = (0, reporter_js_1.generateSummary)(results, config, patterns.length, rules.length, []);
+        const allSafetyWarnings = results.flatMap((r) => r.safetyGuardWarnings);
+        const summary = (0, reporter_js_1.generateSummary)(results, config, patterns.length, rules.length, allSafetyWarnings);
         if (showSummary) {
             (0, reporter_js_1.printSummary)(summary);
         }
@@ -135,7 +136,7 @@ async function sanitize(configOverride) {
  *
  * @example
  * ```ts
- * import { redactReport } from 'playwright-sanitizer';
+ * import { redactReport } from 'pw-sanitizer';
  *
  * const result = await redactReport('./playwright-report/index.html', {
  *   redact: { patterns: [{ id: 'auth', key: 'authorization' }] },
@@ -167,7 +168,7 @@ async function redactReport(reportPath, config) {
  *
  * @example
  * ```ts
- * import { redactTrace } from 'playwright-sanitizer';
+ * import { redactTrace } from 'pw-sanitizer';
  *
  * const result = await redactTrace('./test-results/my-test/trace.zip', {
  *   redact: { patterns: [{ id: 'cookie', key: /^cookie$/i }] },

@@ -7,7 +7,7 @@
  * @example
  * ```ts
  * // playwright-sanitizer.config.ts
- * import type { SanitizerConfig } from 'playwright-sanitizer';
+ * import type { SanitizerConfig } from 'pw-sanitizer';
  *
  * const config: SanitizerConfig = {
  *   redact: {
@@ -365,6 +365,11 @@ export interface RemovalSet {
     indices: Set<number>;
     /** Detailed list of every match (one entry per step per rule). */
     matches: StepMatch[];
+    /**
+     * Safety-guard warning messages emitted when a rule's
+     * `minConsecutiveOccurrences` threshold was not met.
+     */
+    safetyGuardWarnings: string[];
 }
 /**
  * Processing result for a single file (HTML report or trace `.zip`).
@@ -382,6 +387,11 @@ export interface ProcessResult {
     redactionMatches: RedactionMatch[];
     /** Detailed list of every step-removal match. */
     removalMatches: StepMatch[];
+    /**
+     * Safety-guard warning messages collected while processing this file.
+     * Populated when a rule's `minConsecutiveOccurrences` threshold was not met.
+     */
+    safetyGuardWarnings: string[];
 }
 /**
  * Aggregated statistics produced after processing all files.

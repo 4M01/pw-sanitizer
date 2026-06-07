@@ -83,6 +83,7 @@ async function processHtmlReport(inputPath, outputPath, config, patterns, rules)
         timestampRepairs: 0,
         redactionMatches: [],
         removalMatches: [],
+        safetyGuardWarnings: [],
     };
     const html = fs.readFileSync(inputPath, 'utf-8');
     const match = REPORT_DATA_REGEX.exec(html);
@@ -117,6 +118,8 @@ async function processHtmlReport(inputPath, outputPath, config, patterns, rules)
         const events = extractEventsFromReport(reportData);
         if (events.length > 0) {
             const removalSet = (0, detector_js_1.findStepsToRemove)(events, rules);
+            // Always propagate safety warnings regardless of whether removal runs
+            result.safetyGuardWarnings.push(...removalSet.safetyGuardWarnings);
             if (removalSet.indices.size > 0) {
                 if (config.remove.dryRun) {
                     logger_js_1.logger.info(`[DRY RUN] Would remove ${removalSet.indices.size} steps from ${inputPath}`);
@@ -128,13 +131,29 @@ async function processHtmlReport(inputPath, outputPath, config, patterns, rules)
                     result.stepsRemoved = removalSet.indices.size;
                 }
                 else {
-                    const removedEvents = Array.from(removalSet.indices).map((i) => events[i]);
-                    const cleaned = (0, remover_js_1.removeSteps)(events, removalSet);
+                    const orphanStrategy = config.remove.orphanStrategy ?? 'remove-children';
+                    // Remove steps — orphanStrategy controls whether matched parents or only
+                    // their children are dropped from the flat events array.
+                    const cleaned = (0, remover_js_1.removeSteps)(events, removalSet, orphanStrategy);
                     const strategy = config.remove.timestampStrategy ?? 'absorb-into-prev';
-                    const repaired = (0, timestamp_repair_js_1.repairTimestamps)(cleaned, removedEvents, strategy);
-                    replaceEventsInReport(reportData, repaired);
-                    result.stepsRemoved = removalSet.indices.size;
-                    result.timestampRepairs = removalSet.indices.size;
+                    // Determine which events were actually removed (set-difference by identity).
+                    // For remove-children: matched events + their descendants.
+                    // For keep-shell: only the children (matched events are kept).
+                    const cleanedSet = new Set(cleaned);
+                    const actuallyRemovedEvents = events.filter((e) => !cleanedSet.has(e));
+                    const repaired = (0, timestamp_repair_js_1.repairTimestamps)(cleaned, actuallyRemovedEvents, strategy);
+                    // Build callId → repaired event for tree timestamp updates
+                    const repairedByCallId = new Map();
+                    for (const e of repaired) {
+                        if (e.callId)
+                            repairedByCallId.set(e.callId, e);
+                    }
+                    // For the tree traversal: in keep-shell mode the matched parent objects
+                    // stay in the tree — only their children are filtered out.
+                    const treeEventsToRemove = new Set(actuallyRemovedEvents);
+                    replaceEventsInReport(reportData, treeEventsToRemove, repairedByCallId);
+                    result.stepsRemoved = actuallyRemovedEvents.length;
+                    result.timestampRepairs = actuallyRemovedEvents.length;
                     result.removalMatches = removalSet.matches;
                     modified = true;
                 }
@@ -194,27 +213,51 @@ function extractEventsFromReport(data) {
     return events;
 }
 /**
- * Placeholder for post-removal tree reconstruction in HTML reports.
+ * Rebuilds the nested step/action arrays in the HTML report tree after removal.
  *
- * In the current implementation, step mutations during the redact walk phase
- * are applied directly to object references within the report tree, which is
- * sufficient for the redaction use-case.
+ * Because {@link extractEventsFromReport} returns object **references** that
+ * live inside the report tree, `eventsToRemove` can be used as an identity
+ * set to filter matching objects directly from the tree's `steps` / `actions`
+ * arrays without a separate re-serialisation step.
  *
- * Full step-removal support for HTML reports would require rebuilding the
- * nested `steps` arrays in each test result to exclude the removed events —
- * this is tracked as a future enhancement.
+ * Additionally, repaired timestamps (computed from the flat event array) are
+ * applied back to tree nodes that carry a `callId` field.
  *
- * @param _data           - The parsed report data (unused — present for future implementation).
- * @param _repairedEvents - The repaired event array (unused — present for future implementation).
+ * @param data            - The parsed `window.__pw_report_data__` object.
+ * @param eventsToRemove  - Set of original event objects to exclude from step arrays.
+ * @param repairedByCallId - Map of `callId` → repaired event used to update timestamps.
  */
-function replaceEventsInReport(_data, _repairedEvents) {
-    // The events extracted from the report are object references.
-    // removeSteps returns a new array but the original tree still contains
-    // the old references. For a full implementation, we'd need to rebuild
-    // the tree structure. For now, the walked-and-redacted data is sufficient
-    // since we modify the objects in place during the walk phase.
-    //
-    // A more complete implementation would rebuild the steps arrays in the
-    // report tree to match the filtered events.
+function replaceEventsInReport(data, eventsToRemove, repairedByCallId) {
+    function traverse(node) {
+        if (!node || typeof node !== 'object' || Array.isArray(node))
+            return;
+        const obj = node;
+        // Apply repaired timestamps to this node when it has a known callId
+        if (typeof obj['callId'] === 'string') {
+            const repaired = repairedByCallId.get(obj['callId']);
+            if (repaired) {
+                obj['startTime'] = repaired.startTime;
+                obj['endTime'] = repaired.endTime;
+            }
+        }
+        // Filter removed events from step/action arrays and recurse into survivors
+        for (const key of ['steps', 'actions']) {
+            if (Array.isArray(obj[key])) {
+                obj[key] = obj[key].filter((item) => !(item !== null && typeof item === 'object' && eventsToRemove.has(item)));
+                for (const item of obj[key]) {
+                    traverse(item);
+                }
+            }
+        }
+        // Recurse into structural containers (not filtered)
+        for (const key of ['suites', 'tests', 'results', 'attachments']) {
+            if (Array.isArray(obj[key])) {
+                for (const item of obj[key]) {
+                    traverse(item);
+                }
+            }
+        }
+    }
+    traverse(data);
 }
 //# sourceMappingURL=html-report.js.map

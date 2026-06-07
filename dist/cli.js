@@ -1,14 +1,21 @@
 #!/usr/bin/env node
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.applyCliOverrides = applyCliOverrides;
 const commander_1 = require("commander");
 const loader_js_1 = require("./config/loader.js");
 const index_js_1 = require("./index.js");
+// resolveJsonModule: true in tsconfig.json enables this JSON import.
+// TypeScript will type `version` as `string` from the package.json schema.
+const package_json_1 = __importDefault(require("../package.json"));
 const program = new commander_1.Command();
 program
-    .name('playwright-sanitizer')
+    .name('pw-sanitizer')
     .description('Post-process Playwright HTML reports and trace files to redact secrets and remove noisy steps')
-    .version('0.1.0')
+    .version(package_json_1.default.version)
     .option('-c, --config <path>', 'Path to config file')
     .option('-r, --report <path>', 'HTML report directory', './playwright-report')
     .option('-t, --traces <path>', 'Trace directory', './test-results')
@@ -41,7 +48,7 @@ program.action(async (opts) => {
     }
 });
 /**
- * Merges parsed CLI flag values into a {@link SanitizerConfig} object.
+ * Exported for unit testing. Merges parsed CLI flag values into a {@link SanitizerConfig} object.
  *
  * CLI flags always take the highest priority — they overwrite any values
  * that were loaded from a config file. Sections are created on-demand
@@ -109,5 +116,11 @@ function applyCliOverrides(config, opts) {
         config.reporting.summaryFile = opts['summaryOutput'];
     }
 }
-program.parse();
+// Only parse when this file is the Node.js entry-point, not when it is imported
+// by a test or another module. The CJS `require.main === module` idiom is the
+// standard pattern for this in CommonJS (which is what `module: Node16` compiles
+// to when package.json has no `"type": "module"` field).
+if (require.main === module) {
+    program.parse();
+}
 //# sourceMappingURL=cli.js.map

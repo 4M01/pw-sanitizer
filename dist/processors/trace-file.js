@@ -43,6 +43,7 @@ const json_walker_js_1 = require("../redact/json-walker.js");
 const detector_js_1 = require("../remove/detector.js");
 const remover_js_1 = require("../remove/remover.js");
 const timestamp_repair_js_1 = require("../remove/timestamp-repair.js");
+const screenshot_js_1 = require("./screenshot.js");
 const logger_js_1 = require("../logger.js");
 const utils_js_1 = require("../utils.js");
 /**
@@ -59,8 +60,12 @@ const utils_js_1 = require("../utils.js");
  *    - Run {@link findStepsToRemove} on the trace events.
  *    - Run {@link removeSteps} and {@link repairTimestamps}.
  *    - Remove corresponding `network.json` entries by `requestId`.
- * 5. Write modified `trace.json` and `network.json` back into the archive.
- * 6. Re-generate the `.zip` buffer and write it according to `config.output.mode`.
+ * 5. **Screenshot redaction phase** (if `config.output.redactScreenshots` is `true`):
+ *    - Collects element bounding boxes (`box` field) from all trace events.
+ *    - For every PNG/JPEG in `resources/`, blurs the collected regions using {@link redactScreenshot}.
+ *    - Requires the optional `sharp` peer dependency; falls back to a no-op with a warning.
+ * 6. Write modified `trace.json` and `network.json` back into the archive.
+ * 7. Re-generate the `.zip` buffer and write it according to `config.output.mode`.
  *
  * Unreadable files and non-JSON resources are skipped gracefully with warnings.
  *
@@ -79,6 +84,7 @@ async function processTraceFile(inputPath, outputPath, config, patterns, rules) 
         timestampRepairs: 0,
         redactionMatches: [],
         removalMatches: [],
+        safetyGuardWarnings: [],
     };
     let zipData;
     try {
@@ -99,6 +105,11 @@ async function processTraceFile(inputPath, outputPath, config, patterns, rules) 
         return result;
     }
     let modified = false;
+    // Collect element bounding boxes early, before any removal, so that boxes from
+    // steps that will later be removed are still available for screenshot blurring.
+    // Each entry comes from a trace event's `box` field (Playwright records the
+    // on-screen bounding rectangle for UI actions such as fill, click, type, etc.).
+    const elementBoxes = [];
     // Load trace.json
     let traceEvents = null;
     const traceFile = zip.file('trace.json');
@@ -122,6 +133,33 @@ async function processTraceFile(inputPath, outputPath, config, patterns, rules) 
         }
         catch {
             // network.json might not exist in all traces
+        }
+    }
+    // Populate elementBoxes now that trace.json is loaded.
+    // We read boxes from the original events (before any redaction/removal) so that
+    // no coordinates are lost if those events are subsequently removed.
+    if (config.output?.redactScreenshots && traceEvents) {
+        for (const event of traceEvents) {
+            const box = event['box'];
+            if (box !== null && box !== undefined && typeof box === 'object') {
+                const b = box;
+                if (typeof b['x'] === 'number' &&
+                    typeof b['y'] === 'number' &&
+                    typeof b['width'] === 'number' &&
+                    typeof b['height'] === 'number') {
+                    elementBoxes.push({
+                        x: b['x'],
+                        y: b['y'],
+                        width: b['width'],
+                        height: b['height'],
+                    });
+                }
+            }
+        }
+        if (elementBoxes.length === 0) {
+            logger_js_1.logger.verbose(`Screenshot redaction enabled for ${inputPath} but no element bounding boxes ` +
+                `were found in trace events — screenshots will not be blurred. ` +
+                `Bounding boxes are recorded by Playwright for UI actions (fill, click, etc.).`);
         }
     }
     // ── Redact phase ──
@@ -182,6 +220,8 @@ async function processTraceFile(inputPath, outputPath, config, patterns, rules) 
     // ── Remove phase ──
     if (config.remove && rules.length > 0 && traceEvents) {
         const removalSet = (0, detector_js_1.findStepsToRemove)(traceEvents, rules);
+        // Always propagate safety warnings regardless of whether removal runs
+        result.safetyGuardWarnings.push(...removalSet.safetyGuardWarnings);
         if (removalSet.indices.size > 0) {
             if (config.remove.dryRun) {
                 logger_js_1.logger.info(`[DRY RUN] Would remove ${removalSet.indices.size} steps from ${inputPath}`);
@@ -202,11 +242,16 @@ async function processTraceFile(inputPath, outputPath, config, patterns, rules) 
                         removedRequestIds.add(event.requestId);
                     }
                 }
-                // Remove steps
-                const cleaned = (0, remover_js_1.removeSteps)(traceEvents, removalSet);
-                // Repair timestamps
+                // Remove steps (pass orphan strategy so keep-shell is respected)
+                const orphanStrategy = config.remove.orphanStrategy ?? 'remove-children';
+                const cleaned = (0, remover_js_1.removeSteps)(traceEvents, removalSet, orphanStrategy);
+                // Determine which events were actually removed (works for both strategies:
+                // remove-children removes matched + children; keep-shell removes only children)
+                const cleanedSet = new Set(cleaned);
+                const actuallyRemovedEvents = traceEvents.filter((e) => !cleanedSet.has(e));
+                // Repair timestamps using events that were actually removed
                 const strategy = config.remove.timestampStrategy ?? 'absorb-into-prev';
-                traceEvents = (0, timestamp_repair_js_1.repairTimestamps)(cleaned, removedEvents, strategy);
+                traceEvents = (0, timestamp_repair_js_1.repairTimestamps)(cleaned, actuallyRemovedEvents, strategy);
                 // Remove corresponding network.json entries
                 if (networkData && removedRequestIds.size > 0) {
                     networkData = networkData.filter((entry) => {
@@ -219,10 +264,46 @@ async function processTraceFile(inputPath, outputPath, config, patterns, rules) 
                         return true;
                     });
                 }
-                result.stepsRemoved = removalSet.indices.size;
-                result.timestampRepairs = removalSet.indices.size;
+                // stepsRemoved = events actually removed from the output
+                result.stepsRemoved = actuallyRemovedEvents.length;
+                result.timestampRepairs = actuallyRemovedEvents.length;
                 result.removalMatches = removalSet.matches;
                 modified = true;
+            }
+        }
+    }
+    // ── Screenshot redaction phase ──
+    // Runs after remove so the final traceEvents state is consistent, but uses the
+    // bounding boxes collected from the original events (before any removal).
+    if (config.output?.redactScreenshots && elementBoxes.length > 0 && !config.remove?.dryRun) {
+        // Collect all PNG/JPEG screenshot files stored in the zip
+        const screenshotPaths = [];
+        zip.forEach((relativePath, file) => {
+            if (!file.dir &&
+                (relativePath.endsWith('.png') ||
+                    relativePath.endsWith('.jpeg') ||
+                    relativePath.endsWith('.jpg'))) {
+                screenshotPaths.push(relativePath);
+            }
+        });
+        logger_js_1.logger.verbose(`Screenshot redaction: processing ${screenshotPaths.length} screenshot(s) ` +
+            `with ${elementBoxes.length} region(s) in ${inputPath}`);
+        for (const screenshotPath of screenshotPaths) {
+            const screenshotFile = zip.file(screenshotPath);
+            if (!screenshotFile)
+                continue;
+            try {
+                const originalBuffer = await screenshotFile.async('nodebuffer');
+                const redactedBuffer = await (0, screenshot_js_1.redactScreenshot)(originalBuffer, elementBoxes);
+                if (redactedBuffer !== originalBuffer) {
+                    zip.file(screenshotPath, redactedBuffer);
+                    modified = true;
+                    logger_js_1.logger.verbose(`Screenshot redacted: ${screenshotPath}`);
+                }
+            }
+            catch (err) {
+                logger_js_1.logger.warn(`Failed to redact screenshot ${screenshotPath} in ${inputPath}: ` +
+                    `${err instanceof Error ? err.message : String(err)}`);
             }
         }
     }

@@ -11,7 +11,7 @@ import pkg from '../package.json';
 const program = new Command();
 
 program
-  .name('playwright-sanitizer')
+  .name('pw-sanitizer')
   .description(
     'Post-process Playwright HTML reports and trace files to redact secrets and remove noisy steps'
   )

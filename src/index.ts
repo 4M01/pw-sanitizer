@@ -47,7 +47,7 @@ export { loadRuleFile } from './remove/rule-loader.js';
  *
  * Typical usage — run after a Playwright test suite from your own script:
  * ```ts
- * import { sanitize } from 'playwright-sanitizer';
+ * import { sanitize } from 'pw-sanitizer';
  *
  * await sanitize({
  *   redact: { patterns: [{ id: 'token', key: 'authorization' }] },
@@ -158,7 +158,7 @@ export async function sanitize(
  *
  * @example
  * ```ts
- * import { redactReport } from 'playwright-sanitizer';
+ * import { redactReport } from 'pw-sanitizer';
  *
  * const result = await redactReport('./playwright-report/index.html', {
  *   redact: { patterns: [{ id: 'auth', key: 'authorization' }] },
@@ -201,7 +201,7 @@ export async function redactReport(
  *
  * @example
  * ```ts
- * import { redactTrace } from 'playwright-sanitizer';
+ * import { redactTrace } from 'pw-sanitizer';
  *
  * const result = await redactTrace('./test-results/my-test/trace.zip', {
  *   redact: { patterns: [{ id: 'cookie', key: /^cookie$/i }] },

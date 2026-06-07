@@ -13,8 +13,12 @@ import type { SanitizerConfig, RedactPattern, RemoveRule, ProcessResult } from '
  *    - Run {@link findStepsToRemove} on the trace events.
  *    - Run {@link removeSteps} and {@link repairTimestamps}.
  *    - Remove corresponding `network.json` entries by `requestId`.
- * 5. Write modified `trace.json` and `network.json` back into the archive.
- * 6. Re-generate the `.zip` buffer and write it according to `config.output.mode`.
+ * 5. **Screenshot redaction phase** (if `config.output.redactScreenshots` is `true`):
+ *    - Collects element bounding boxes (`box` field) from all trace events.
+ *    - For every PNG/JPEG in `resources/`, blurs the collected regions using {@link redactScreenshot}.
+ *    - Requires the optional `sharp` peer dependency; falls back to a no-op with a warning.
+ * 6. Write modified `trace.json` and `network.json` back into the archive.
+ * 7. Re-generate the `.zip` buffer and write it according to `config.output.mode`.
  *
  * Unreadable files and non-JSON resources are skipped gracefully with warnings.
  *

@@ -1,18 +1,33 @@
 import type { TraceEvent, RemovalSet } from '../config/types.js';
 /**
- * Removes the matched steps — and all their descendants — from the events array.
+ * Removes steps from the events array according to the configured orphan strategy.
  *
+ * ### `'remove-children'` (default)
+ * Removes every matched step **and all of its descendants**.
  * Algorithm:
  * 1. Expands the removal set to include all descendant events (via {@link collectChildIndices}).
  * 2. Sorts the combined indices in **descending** order so earlier indices remain
  *    stable as elements are spliced out.
  * 3. Splices each index from a shallow copy of the events array.
  *
- * The input array is **never mutated** — a new array is returned.
+ * ### `'keep-shell'`
+ * Keeps each matched step as a hollow, child-free container and removes **only its
+ * descendants**. This is useful when you want the step to remain visible in the
+ * trace timeline (e.g. to preserve overall duration) but need to strip its
+ * sub-steps that may contain sensitive details.
  *
- * @param events     - The ordered list of trace events.
- * @param removalSet - The set of matched step indices (from {@link findStepsToRemove}).
- * @returns A new array with all matched steps (and their descendants) removed.
+ * Algorithm:
+ * 1. For each matched index, collects all descendant indices via {@link collectChildIndices}.
+ * 2. The matched indices themselves are **not** added to the removal set.
+ * 3. Splices descendant indices in descending order from a shallow copy.
+ *
+ * The input array is **never mutated** — a new array is always returned.
+ *
+ * @param events          - The ordered list of trace events.
+ * @param removalSet      - The set of matched step indices (from {@link findStepsToRemove}).
+ * @param orphanStrategy  - How to handle descendants of removed steps.
+ *   `'remove-children'` *(default)* or `'keep-shell'`.
+ * @returns A new array with the appropriate steps removed.
  */
-export declare function removeSteps(events: TraceEvent[], removalSet: RemovalSet): TraceEvent[];
+export declare function removeSteps(events: TraceEvent[], removalSet: RemovalSet, orphanStrategy?: 'remove-children' | 'keep-shell'): TraceEvent[];
 //# sourceMappingURL=remover.d.ts.map

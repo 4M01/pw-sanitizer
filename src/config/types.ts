@@ -11,7 +11,7 @@
  * @example
  * ```ts
  * // playwright-sanitizer.config.ts
- * import type { SanitizerConfig } from 'playwright-sanitizer';
+ * import type { SanitizerConfig } from 'pw-sanitizer';
  *
  * const config: SanitizerConfig = {
  *   redact: {
