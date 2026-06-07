@@ -17,7 +17,7 @@ const logger_js_1 = require("./logger.js");
  * import { defineConfig } from '@playwright/test';
  *
  * export default defineConfig({
- *   globalTeardown: require.resolve('playwright-sanitizer/teardown'),
+ *   globalTeardown: require.resolve('pw-sanitizer/teardown'),
  * });
  * ```
  *

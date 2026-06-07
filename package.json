@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "playwright-sanitizer": "dist/cli.js"
+    "pw-sanitizer": "dist/cli.js"
   },
   "exports": {
     ".": {
@@ -47,7 +47,8 @@
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "glob": "^11.0.0",
-    "jszip": "^3.10.1"
+    "jszip": "^3.10.1",
+    "jiti": "^1.21.6"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

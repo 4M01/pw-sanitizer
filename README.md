@@ -34,7 +34,7 @@ It also lets you delete repetitive or internal steps (e.g. health-check pings, i
 ## Installation
 
 ```bash
-npm install --save-dev playwright-sanitizer
+npm install --save-dev pw-sanitizer
 ```
 
 Screenshot redaction inside trace files requires the optional `sharp` dependency:
@@ -51,7 +51,7 @@ npm install --save-dev sharp
 
 ```ts
 // playwright-sanitizer.config.ts
-import type { SanitizerConfig } from 'playwright-sanitizer';
+import type { SanitizerConfig } from 'pw-sanitizer';
 
 const config: SanitizerConfig = {
   redact: {
@@ -85,7 +85,7 @@ export default config;
 ### 2. Run the CLI
 
 ```bash
-npx playwright-sanitizer
+npx pw-sanitizer
 ```
 
 Sanitized files are written to `./sanitized-report` by default. Originals are untouched.
@@ -106,8 +106,11 @@ Config is auto-discovered in this priority order:
 
 ### Full config reference
 
+> [!NOTE]
+> TypeScript configuration files (`.ts`) are supported natively by default using `jiti`. No separate runner or transpilation step is required.
+
 ```ts
-import type { SanitizerConfig } from 'playwright-sanitizer';
+import type { SanitizerConfig } from 'pw-sanitizer';
 
 const config: SanitizerConfig = {
   redact: {
@@ -203,7 +206,7 @@ For large teams, keep patterns and rules in dedicated files so they can be versi
 
 ```ts
 // secrets/patterns.ts
-import type { RedactPattern } from 'playwright-sanitizer';
+import type { RedactPattern } from 'pw-sanitizer';
 
 const patterns: RedactPattern[] = [
   { id: 'auth-header', key: 'authorization', severity: 'critical' },
@@ -235,7 +238,7 @@ JSON files are also supported. Note that RegExp is not available in JSON — str
 ## CLI reference
 
 ```
-Usage: playwright-sanitizer [options]
+Usage: pw-sanitizer [options]
 
 Options:
   -c, --config <path>          Path to config file
@@ -258,22 +261,22 @@ Options:
 
 ```bash
 # Auto-discover config and run with defaults
-npx playwright-sanitizer
+npx pw-sanitizer
 
 # Use a specific config file
-npx playwright-sanitizer --config ./ci/sanitizer.config.ts
+npx pw-sanitizer --config ./ci/sanitizer.config.ts
 
 # Overwrite originals (ensure files are version-controlled)
-npx playwright-sanitizer --in-place
+npx pw-sanitizer --in-place
 
 # Preview without writing any files
-npx playwright-sanitizer --dry-run --log-level verbose
+npx pw-sanitizer --dry-run --log-level verbose
 
 # Point to non-default directories
-npx playwright-sanitizer --report ./reports --traces ./artifacts/traces --output ./sanitized
+npx pw-sanitizer --report ./reports --traces ./artifacts/traces --output ./sanitized
 
 # Write a machine-readable summary for CI artifact ingestion
-npx playwright-sanitizer --summary-output ./sanitization-summary.json
+npx pw-sanitizer --summary-output ./sanitization-summary.json
 ```
 
 ---
@@ -287,7 +290,7 @@ Register the sanitizer as a Playwright `globalTeardown` and it runs automaticall
 import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
-  globalTeardown: require.resolve('playwright-sanitizer/teardown'),
+  globalTeardown: require.resolve('pw-sanitizer/teardown'),
   // ...rest of your config
 });
 ```
@@ -301,10 +304,10 @@ If you prefer a single config file, add a `sanitizer` key directly to your Playw
 ```ts
 // playwright.config.ts
 import { defineConfig } from '@playwright/test';
-import type { SanitizerConfig } from 'playwright-sanitizer';
+import type { SanitizerConfig } from 'pw-sanitizer';
 
 export default defineConfig({
-  globalTeardown: require.resolve('playwright-sanitizer/teardown'),
+  globalTeardown: require.resolve('pw-sanitizer/teardown'),
 
   sanitizer: {
     redact: {
@@ -322,7 +325,7 @@ export default defineConfig({
 ## Programmatic API
 
 ```ts
-import { sanitize, redactReport, redactTrace } from 'playwright-sanitizer';
+import { sanitize, redactReport, redactTrace } from 'pw-sanitizer';
 
 // Process all reports and traces using auto-discovered config
 const results = await sanitize();
@@ -399,7 +402,7 @@ The `minConsecutiveOccurrences` safety guard prevents accidentally removing a st
   run: npx playwright test
 
 - name: Sanitize Playwright artifacts
-  run: npx playwright-sanitizer --summary-output sanitization-summary.json
+  run: npx pw-sanitizer --summary-output sanitization-summary.json
 
 - name: Upload sanitized report
   uses: actions/upload-artifact@v4

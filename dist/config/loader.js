@@ -32,10 +32,14 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.loadConfig = loadConfig;
 const fs = __importStar(require("node:fs"));
 const path = __importStar(require("node:path"));
+const jiti_1 = __importDefault(require("jiti"));
 const logger_js_1 = require("../logger.js");
 /**
  * Ordered list of config file names that are auto-discovered in the current
@@ -67,26 +71,13 @@ async function loadConfigFromFile(filePath) {
         const content = fs.readFileSync(absolutePath, 'utf-8');
         return JSON.parse(content);
     }
-    // .ts or .js — use dynamic import
+    // Use jiti to transpile and load .ts or .js config files natively
     try {
-        const module = await import(absolutePath);
+        const jiti = (0, jiti_1.default)(__filename);
+        const module = jiti(absolutePath);
         return (module.default ?? module);
     }
     catch (err) {
-        // If .ts failed, try .js sibling
-        if (ext === '.ts') {
-            const jsSibling = absolutePath.replace(/\.ts$/, '.js');
-            if (fs.existsSync(jsSibling)) {
-                try {
-                    const module = await import(jsSibling);
-                    return (module.default ?? module);
-                }
-                catch {
-                    return logger_js_1.logger.fatal(`Failed to load config from both ${absolutePath} and ${jsSibling}. ` +
-                        `Ensure tsx or ts-node is available, or provide a .js config file.`);
-                }
-            }
-        }
         return logger_js_1.logger.fatal(`Failed to load config from ${absolutePath}: ${err instanceof Error ? err.message : String(err)}`);
     }
 }
@@ -106,7 +97,8 @@ async function loadFromPlaywrightConfig(cwd) {
         const fullPath = path.resolve(cwd, name);
         if (fs.existsSync(fullPath)) {
             try {
-                const module = await import(fullPath);
+                const jiti = (0, jiti_1.default)(__filename);
+                const module = jiti(fullPath);
                 const config = module.default ?? module;
                 if (config && typeof config === 'object' && 'sanitizer' in config) {
                     return config.sanitizer;

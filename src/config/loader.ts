@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import createJiti from 'jiti';
 import type { SanitizerConfig } from './types.js';
 import { logger } from '../logger.js';
 
@@ -38,26 +39,12 @@ async function loadConfigFromFile(filePath: string): Promise<SanitizerConfig> {
     return JSON.parse(content) as SanitizerConfig;
   }
 
-  // .ts or .js — use dynamic import
+  // Use jiti to transpile and load .ts or .js config files natively
   try {
-    const module = await import(absolutePath);
+    const jiti = createJiti(__filename);
+    const module = jiti(absolutePath);
     return (module.default ?? module) as SanitizerConfig;
   } catch (err) {
-    // If .ts failed, try .js sibling
-    if (ext === '.ts') {
-      const jsSibling = absolutePath.replace(/\.ts$/, '.js');
-      if (fs.existsSync(jsSibling)) {
-        try {
-          const module = await import(jsSibling);
-          return (module.default ?? module) as SanitizerConfig;
-        } catch {
-          return logger.fatal(
-            `Failed to load config from both ${absolutePath} and ${jsSibling}. ` +
-            `Ensure tsx or ts-node is available, or provide a .js config file.`
-          );
-        }
-      }
-    }
     return logger.fatal(
       `Failed to load config from ${absolutePath}: ${err instanceof Error ? err.message : String(err)}`
     );
@@ -81,7 +68,8 @@ async function loadFromPlaywrightConfig(cwd: string): Promise<SanitizerConfig | 
     const fullPath = path.resolve(cwd, name);
     if (fs.existsSync(fullPath)) {
       try {
-        const module = await import(fullPath);
+        const jiti = createJiti(__filename);
+        const module = jiti(fullPath);
         const config = module.default ?? module;
         if (config && typeof config === 'object' && 'sanitizer' in config) {
           return config.sanitizer as SanitizerConfig;

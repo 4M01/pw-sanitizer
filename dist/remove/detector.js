@@ -108,6 +108,7 @@ function findConsecutiveRuns(events, rule) {
 function findStepsToRemove(events, rules) {
     const indices = new Set();
     const matches = [];
+    const safetyGuardWarnings = [];
     for (const rule of rules) {
         if (rule.minConsecutiveOccurrences !== undefined) {
             // Use consecutive-run logic
@@ -126,9 +127,11 @@ function findStepsToRemove(events, rules) {
                 }
                 else {
                     // Threshold NOT met — warn and skip this entire run
-                    logger_js_1.logger.warn(`Rule "${rule.label}" matched ${run.length} consecutive occurrences ` +
+                    const warningMsg = `Rule "${rule.label}" matched ${run.length} consecutive occurrences ` +
                         `but minConsecutiveOccurrences is ${rule.minConsecutiveOccurrences}. ` +
-                        `Skipping removal. Review your rule.`);
+                        `Skipping removal. Review your rule.`;
+                    logger_js_1.logger.warn(warningMsg);
+                    safetyGuardWarnings.push(warningMsg);
                 }
             }
         }
@@ -147,6 +150,6 @@ function findStepsToRemove(events, rules) {
             }
         }
     }
-    return { indices, matches };
+    return { indices, matches, safetyGuardWarnings };
 }
 //# sourceMappingURL=detector.js.map

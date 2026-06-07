@@ -6,29 +6,29 @@
  * are identified by mapping CSS selectors from redact patterns to pixel
  * coordinates recorded in the trace.
  *
- * **Current status**: placeholder implementation. The function signature and
- * `sharp` integration skeleton are in place, but the coordinate-mapping logic
- * and blur overlay are not yet implemented. Requires the optional `sharp`
- * peer dependency (`npm install sharp`).
+ * Requires the optional `sharp` peer dependency (`npm install sharp`).
+ * Falls back to a no-op (returning the original buffer) when `sharp` is absent.
  */
 /**
  * Applies pixel-level redaction to a screenshot buffer by blurring the
  * specified rectangular regions.
  *
- * @remarks
- * This is a **placeholder** — the function currently returns the original
- * buffer unchanged. A full implementation would use `sharp` to composite
- * blurred rectangles over the matching coordinates.
+ * For each region the function:
+ * 1. Extracts the pixel rectangle from the original image.
+ * 2. Applies a Gaussian blur (sigma = 20) to the extracted patch.
+ * 3. Composites the blurred patch back over the original at the same position.
  *
- * If `sharp` is not installed, a warning is logged and the original buffer
- * is returned (no-op behaviour).
+ * Regions that fall entirely outside the image bounds are silently skipped.
+ * If `regions` is empty, the original buffer is returned immediately.
  *
- * @param _screenshotBuffer - The raw PNG/JPEG screenshot buffer from the trace archive.
- * @param _regions          - Pixel-coordinate rectangles to blur (x, y, width, height — all in px).
+ * If `sharp` is not installed, a warning is logged and the original buffer is
+ * returned unchanged.
+ *
+ * @param screenshotBuffer - The raw PNG/JPEG screenshot buffer from the trace archive.
+ * @param regions          - Pixel-coordinate rectangles to blur (x, y, width, height — all in px).
  * @returns The (potentially blurred) screenshot buffer.
- *   Currently always returns `_screenshotBuffer` unchanged.
  */
-export declare function redactScreenshot(_screenshotBuffer: Buffer, _regions: Array<{
+export declare function redactScreenshot(screenshotBuffer: Buffer, regions: Array<{
     x: number;
     y: number;
     width: number;
