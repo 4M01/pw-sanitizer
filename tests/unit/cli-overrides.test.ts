@@ -64,6 +64,63 @@ describe('applyCliOverrides', () => {
     expect(config.reporting?.summaryFile).toBe('./summary.json');
   });
 
+  // ── CLI > config precedence (regression: --traces used to be ignored) ──
+
+  it('REGRESSION: --traces overrides config traceDir', () => {
+    const config: SanitizerConfig = {
+      output: { traceDir: './test-results' },
+    };
+    // Commander parses -t/--traces <path...> as an array of strings
+    applyCliOverrides(config, { traces: ['/tmp/other'] });
+    expect(config.output?.traceDir).toBe('/tmp/other');
+  });
+
+  it('uses config traceDir when --traces flag is absent', () => {
+    const config: SanitizerConfig = {
+      output: { traceDir: './from-config' },
+    };
+    // Commander sets opts.traces to true when --no-traces exists but neither
+    // --traces <path> nor --no-traces was passed
+    applyCliOverrides(config, { traces: true });
+    expect(config.output?.traceDir).toBe('./from-config');
+    expect(config.output?.processTraces).toBeUndefined();
+
+    // Also when the key is entirely absent
+    const config2: SanitizerConfig = {
+      output: { traceDir: './from-config' },
+    };
+    applyCliOverrides(config2, {});
+    expect(config2.output?.traceDir).toBe('./from-config');
+  });
+
+  it('supports repeated --traces flags as an array traceDir', () => {
+    const config: SanitizerConfig = {};
+    applyCliOverrides(config, {
+      traces: ['./test-results', './playwright-report/data'],
+    });
+    expect(config.output?.traceDir).toEqual([
+      './test-results',
+      './playwright-report/data',
+    ]);
+  });
+
+  it('still maps --no-traces to processTraces = false without touching traceDir', () => {
+    const config: SanitizerConfig = {
+      output: { traceDir: './from-config' },
+    };
+    applyCliOverrides(config, { traces: false });
+    expect(config.output?.processTraces).toBe(false);
+    expect(config.output?.traceDir).toBe('./from-config');
+  });
+
+  it('does not clobber config reportDir when opts.report is a non-string (negation default)', () => {
+    const config: SanitizerConfig = {
+      output: { reportDir: './from-config' },
+    };
+    applyCliOverrides(config, { report: true });
+    expect(config.output?.reportDir).toBe('./from-config');
+  });
+
   it('does not overwrite existing config values when flags are absent', () => {
     const config: SanitizerConfig = {
       output: { mode: 'in-place', reportDir: './orig' },

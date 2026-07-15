@@ -239,10 +239,12 @@ describe('processHtmlReport', () => {
     });
   });
 
-  // ── 4. Missing marker pattern: warning logged, 0 changes ──────────────
+  // ── 4. Missing marker pattern: silently skipped, 0 changes ────────────
+  // (Payload-free HTML is expected — Playwright ships static trace-viewer
+  // app assets inside the report dir — so no warning must be emitted.)
 
   describe('missing report data marker', () => {
-    it('logs a warning and returns 0 changes when marker is not found', async () => {
+    it('skips without warning and returns 0 changes when no marker is found', async () => {
       const htmlWithoutMarker =
         '<html><head><script>console.log("no data here");</script></head><body></body></html>';
       const filePath = createTempHtml(htmlWithoutMarker);
@@ -261,10 +263,8 @@ describe('processHtmlReport', () => {
       expect(result.stepsRemoved).toBe(0);
       expect(result.timestampRepairs).toBe(0);
 
-      // The logger.warn calls console.warn with a [WARN] prefix
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Could not find embedded report data'),
-      );
+      // No warning — payload-free HTML files are skipped at verbose level
+      expect(warnSpy).not.toHaveBeenCalled();
 
       warnSpy.mockRestore();
     });

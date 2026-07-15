@@ -276,8 +276,23 @@ export interface OutputConfig {
   /** Directory containing Playwright HTML report files. Default: `'./playwright-report'` */
   reportDir?: string;
 
-  /** Directory containing Playwright test result trace files. Default: `'./test-results'` */
-  traceDir?: string;
+  /**
+   * Directory (or directories) containing Playwright trace `.zip` files.
+   * Default: `'./test-results'`
+   *
+   * Accepts an array so you can also cover the trace copies the HTML report
+   * serves from its own `data/` folder — those are what the report's built-in
+   * trace viewer actually opens, so sanitizing `test-results` alone leaves
+   * them dirty:
+   *
+   * ```ts
+   * traceDir: ['./test-results', './playwright-report/data']
+   * ```
+   *
+   * Files matched by more than one directory are processed only once
+   * (deduplicated by resolved absolute path).
+   */
+  traceDir?: string | string[];
 
   /**
    * Output mode.

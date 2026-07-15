@@ -40,6 +40,45 @@ export { loadPatternFile } from './redact/pattern-loader.js';
 export { loadRuleFile } from './remove/rule-loader.js';
 
 /**
+ * Discovers trace `.zip` files across one or more trace directories.
+ *
+ * `output.traceDir` accepts `string | string[]` — an array lets a single run
+ * cover both `./test-results` and the HTML report's `data/` folder (the trace
+ * copies the report's built-in viewer actually opens). Files matched by more
+ * than one directory are deduplicated by resolved absolute path; the first
+ * directory that matched a file is kept as its root for output-path mirroring.
+ *
+ * Exported primarily for testing.
+ *
+ * @param traceDir - The configured trace directory or directories.
+ *   Defaults to `'./test-results'` when omitted.
+ * @returns One entry per unique trace file: the absolute file path plus the
+ *   trace directory it was discovered under.
+ */
+export async function collectTraceFiles(
+  traceDir?: string | string[]
+): Promise<Array<{ file: string; dir: string }>> {
+  const dirs = Array.isArray(traceDir)
+    ? traceDir
+    : [traceDir ?? './test-results'];
+
+  const collected: Array<{ file: string; dir: string }> = [];
+  const seen = new Set<string>();
+
+  for (const dir of dirs) {
+    const files = await findFiles(dir, '**/*.zip');
+    for (const file of files) {
+      const resolved = path.resolve(file);
+      if (seen.has(resolved)) continue;
+      seen.add(resolved);
+      collected.push({ file, dir });
+    }
+  }
+
+  return collected;
+}
+
+/**
  * Main programmatic entry point for `playwright-sanitizer`.
  *
  * Discovers (or uses the provided) configuration, then processes all matching
@@ -106,11 +145,10 @@ export async function sanitize(
 
   // Process trace files
   if (config.output?.processTraces !== false) {
-    const traceDir = config.output?.traceDir ?? './test-results';
-    const traceFiles = await findFiles(traceDir, '**/*.zip');
+    const traceFiles = await collectTraceFiles(config.output?.traceDir);
 
-    for (const file of traceFiles) {
-      const outputPath = computeOutputPath(file, traceDir, config);
+    for (const { file, dir } of traceFiles) {
+      const outputPath = computeOutputPath(file, dir, config);
       const result = await processTraceFile(
         file,
         outputPath,

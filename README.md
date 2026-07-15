@@ -19,7 +19,7 @@ It also lets you delete repetitive or internal steps (e.g. health-check pings, i
 - Three output modes: `copy` (safe default), `in-place`, `side-by-side`
 - Zero built-in patterns — you declare exactly what gets touched, nothing else runs
 - Dry-run mode to preview changes without writing files
-- Integrates as a Playwright `globalTeardown` so it runs automatically after every test run
+- Integrates as a Playwright **reporter** (`pw-sanitizer/reporter`) so it runs automatically after every test run — after the HTML report is written
 - Programmatic API for custom pipelines
 - Summary table printed to the console (and optionally written as JSON)
 
@@ -184,7 +184,13 @@ const config: SanitizerConfig = {
 
   output: {
     reportDir: './playwright-report', // where to find HTML reports. Default: './playwright-report'
-    traceDir: './test-results',       // where to find trace zips. Default: './test-results'
+
+    // Where to find trace zips — string or array. Default: './test-results'
+    // RECOMMENDED: include the report's data/ folder too. The HTML report's
+    // built-in trace viewer opens the trace COPIES under playwright-report/data,
+    // so sanitizing test-results alone leaves those copies dirty.
+    // Overlapping matches are deduplicated by absolute path.
+    traceDir: ['./test-results', './playwright-report/data'],
 
     // Output mode:
     // 'copy' (default): write sanitized files to dir, originals untouched
@@ -254,7 +260,7 @@ Usage: pw-sanitizer [options]
 Options:
   -c, --config <path>          Path to config file
   -r, --report <path>          HTML report directory (default: "./playwright-report")
-  -t, --traces <path>          Trace directory (default: "./test-results")
+  -t, --traces <path...>       Trace directory — repeatable (default: "./test-results")
   -o, --output <path>          Output directory (copy mode)
       --in-place               Overwrite original files
       --patterns <path...>     One or more pattern files
@@ -267,6 +273,8 @@ Options:
   -V, --version                Display version number
   -h, --help                   Display help
 ```
+
+Precedence is strictly **CLI flag > config file > built-in default**. A flag only overrides its config-file counterpart when it is actually passed on the command line.
 
 ### Examples
 
@@ -286,15 +294,50 @@ npx pw-sanitizer --dry-run --log-level verbose
 # Point to non-default directories
 npx pw-sanitizer --report ./reports --traces ./artifacts/traces --output ./sanitized
 
+# Cover both trace locations (test-results + the report's data/ copies)
+npx pw-sanitizer --traces ./test-results ./playwright-report/data --in-place
+
 # Write a machine-readable summary for CI artifact ingestion
 npx pw-sanitizer --summary-output ./sanitization-summary.json
 ```
 
 ---
 
-## Playwright globalTeardown integration
+## Playwright reporter integration (recommended)
 
-Register the sanitizer as a Playwright `globalTeardown` and it runs automatically after every test suite:
+Register the sanitizer as a Playwright **reporter** and it runs automatically after every test run:
+
+```ts
+// playwright.config.ts
+import { defineConfig } from '@playwright/test';
+
+export default defineConfig({
+  reporter: [
+    ['html'],
+    ['pw-sanitizer/reporter'], // list last by convention
+  ],
+  // ...rest of your config
+});
+```
+
+This is the right hook for sanitizing HTML reports. Playwright's end-of-run order is:
+
+1. tests finish
+2. `globalTeardown` runs
+3. `reporter.onEnd()` for each reporter — **this is where the HTML report and the `playwright-report/data/*.zip` trace copies get written**
+4. `reporter.onExit()` for each reporter — where `pw-sanitizer/reporter` runs
+
+Because all `onEnd()` calls complete before any `onExit()`, correctness does not depend on reporter order — listing the sanitizer last is just a readability convention. The reporter never prints to stdio, and sanitizer failures are caught and logged so they can never mask your test results.
+
+Options: pass `configPath` to skip auto-discovery — `['pw-sanitizer/reporter', { configPath: './ci/sanitizer.config.ts' }]`.
+
+> [!TIP]
+> Pair this with `traceDir: ['./test-results', './playwright-report/data']` so the trace copies that the report's built-in trace viewer opens get sanitized too.
+
+### globalTeardown integration (trace-only)
+
+> [!WARNING]
+> Playwright runs `globalTeardown` **before** reporters write their output. When this hook fires, the current run's HTML report and its `data/` trace copies do not exist yet — at best you would sanitize the previous run's report. Only use this integration when you exclusively sanitize `test-results` traces; otherwise use `pw-sanitizer/reporter` above.
 
 ```ts
 // playwright.config.ts
@@ -318,7 +361,7 @@ import { defineConfig } from '@playwright/test';
 import type { SanitizerConfig } from 'pw-sanitizer';
 
 export default defineConfig({
-  globalTeardown: require.resolve('pw-sanitizer/teardown'),
+  reporter: [['html'], ['pw-sanitizer/reporter']],
 
   sanitizer: {
     redact: {
@@ -326,7 +369,10 @@ export default defineConfig({
         { id: 'auth', key: 'authorization', severity: 'critical' },
       ],
     },
-    output: { mode: 'in-place' },
+    output: {
+      mode: 'in-place',
+      traceDir: ['./test-results', './playwright-report/data'],
+    },
   } satisfies SanitizerConfig,
 });
 ```

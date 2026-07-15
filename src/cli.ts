@@ -16,16 +16,18 @@ program
     'Post-process Playwright HTML reports and trace files to redact secrets and remove noisy steps'
   )
   .version(pkg.version)
+  // NOTE: value flags deliberately have NO Commander defaults. A default would
+  // make the flag look "provided" on every run, so it would silently override
+  // config-file values (CLI > config > default precedence would break).
+  // Effective defaults are applied downstream in sanitize().
   .option('-c, --config <path>', 'Path to config file')
   .option(
     '-r, --report <path>',
-    'HTML report directory',
-    './playwright-report'
+    'HTML report directory (default: ./playwright-report)'
   )
   .option(
-    '-t, --traces <path>',
-    'Trace directory',
-    './test-results'
+    '-t, --traces <path...>',
+    'Trace directory — repeatable (default: ./test-results)'
   )
   .option('-o, --output <path>', 'Output directory (for copy mode)')
   .option('--in-place', 'Overwrite original files')
@@ -35,8 +37,7 @@ program
   )
   .option(
     '--placeholder <string>',
-    'Redaction placeholder',
-    '[REDACTED]'
+    'Redaction placeholder (default: [REDACTED])'
   )
   .option('--dry-run', 'Log changes without writing files')
   .option('--no-traces', 'Skip trace file processing')
@@ -47,8 +48,7 @@ program
   )
   .option(
     '--log-level <level>',
-    'silent | normal | verbose',
-    'normal'
+    'silent | normal | verbose (default: normal)'
   );
 
 program.action(async (opts: Record<string, unknown>) => {
@@ -81,6 +81,7 @@ program.action(async (opts: Record<string, unknown>) => {
  *
  * Flag → config field mapping:
  * - `--report`         → `output.reportDir`
+ * - `--traces <path>`  → `output.traceDir` (string or array when repeated)
  * - `--no-traces`      → `output.processTraces = false`
  * - `--no-reports`     → `output.processReports = false`
  * - `--output`         → `output.dir` + `output.mode = 'copy'`
@@ -90,6 +91,14 @@ program.action(async (opts: Record<string, unknown>) => {
  * - `--dry-run`        → `remove.dryRun = true`
  * - `--log-level`      → `reporting.logLevel`
  * - `--summary-output` → `reporting.summaryFile`
+ *
+ * Precedence is strictly CLI > config file > built-in default: a flag only
+ * touches the config when it was actually provided (no Commander defaults),
+ * so config-file values survive when the corresponding flag is absent.
+ *
+ * Note on `--traces` / `--no-traces`: Commander merges both into `opts.traces` —
+ * `false` (skip processing), a string/array (directory override), or
+ * `true`/`undefined` (absent).
  *
  * @param config - The config object to mutate (loaded from file or empty).
  * @param opts   - Raw parsed options from Commander.js (`program.opts()`).
@@ -101,11 +110,19 @@ export function applyCliOverrides(
   // Output overrides
   if (!config.output) config.output = {};
 
-  if (opts['report']) {
-    config.output.reportDir = opts['report'] as string;
+  if (typeof opts['report'] === 'string') {
+    config.output.reportDir = opts['report'];
   }
   if (opts['traces'] === false) {
     config.output.processTraces = false;
+  } else if (typeof opts['traces'] === 'string') {
+    config.output.traceDir = opts['traces'];
+  } else if (
+    Array.isArray(opts['traces']) &&
+    opts['traces'].every((t): t is string => typeof t === 'string')
+  ) {
+    config.output.traceDir =
+      opts['traces'].length === 1 ? opts['traces'][0] : opts['traces'];
   }
   if (opts['reports'] === false) {
     config.output.processReports = false;
