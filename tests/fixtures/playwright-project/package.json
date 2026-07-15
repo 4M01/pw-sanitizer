@@ -1,0 +1,11 @@
+{
+  "name": "pw-sanitizer-fixture-generator",
+  "private": true,
+  "description": "Tiny self-contained Playwright project used to (re)generate the real artifacts in tests/fixtures/real. No browser required — the spec only uses test.step.",
+  "scripts": {
+    "generate": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.0"
+  }
+}
