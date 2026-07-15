@@ -524,7 +524,13 @@ function processLegacyReportData(
           const cleanedSet = new Set(cleaned);
           const actuallyRemovedEvents = events.filter((e) => !cleanedSet.has(e));
 
-          const repaired = repairTimestamps(cleaned, actuallyRemovedEvents, strategy);
+          // keep-shell: kept parents still span the hidden children's time —
+          // no timeline hole exists, so nothing may be absorbed into neighbours.
+          const repaired = repairTimestamps(
+            cleaned,
+            orphanStrategy === 'keep-shell' ? [] : actuallyRemovedEvents,
+            strategy
+          );
 
           const repairedByCallId = new Map<string, TraceEvent>();
           for (const e of repaired) {

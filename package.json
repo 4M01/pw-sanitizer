@@ -1,6 +1,6 @@
 {
   "name": "pw-sanitizer",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Post-process Playwright HTML reports and trace files to redact secrets and remove noisy steps",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -55,8 +55,19 @@ interface NdjsonFile {
  * ```
  */
 interface NdjsonStep {
+  /** The NDJSON file this step lives in. `callId`s are only unique per file. */
+  file: NdjsonFile;
   callId: string;
   parentId?: string;
+  /**
+   * Cross-file link: library-side events (`0-trace.trace`, `1-trace.trace`, ...
+   * with class `Page` / `APIRequestContext` / ...) carry a `stepId` field that
+   * references the test-runner step (in `test.trace`) they belong to, e.g.
+   * `{"type":"before","callId":"call@7",...,"stepId":"pw:api@90"}`.
+   * Set only when `stepId` differs from the event's own `callId`
+   * (test-runner events carry `stepId === callId`).
+   */
+  linkedStepId?: string;
   /** Line index of the `"before"` event within its file. */
   beforeIndex: number;
   /** Line index of the paired `"after"` event, or -1 if absent. */
@@ -119,9 +130,15 @@ function collectSteps(file: NdjsonFile): NdjsonStep[] {
       const callId = lineCallId(obj);
       if (!callId) continue;
       const params = (obj['params'] ?? {}) as Record<string, unknown>;
+      const rawStepId = obj['stepId'];
       const step: NdjsonStep = {
+        file,
         callId,
         parentId: typeof obj['parentId'] === 'string' ? obj['parentId'] : undefined,
+        linkedStepId:
+          typeof rawStepId === 'string' && rawStepId !== callId
+            ? rawStepId
+            : undefined,
         beforeIndex: i,
         afterIndex: -1,
         synthetic: {
@@ -161,29 +178,56 @@ function collectSteps(file: NdjsonFile): NdjsonStep[] {
 }
 
 /**
- * Expands a set of matched step callIds to include all descendants by walking
- * the `parentId` chain (children can nest arbitrarily — test.step children,
- * pw:api calls, expects, etc.).
+ * Expands a set of matched steps to include all descendants across the WHOLE
+ * archive (children can nest arbitrarily — test.step children, pw:api calls,
+ * expects, etc.).
+ *
+ * Two kinds of parent→child edges are walked:
+ * - **same-file**: `child.parentId === parent.callId` within one `.trace` file;
+ * - **cross-file**: `child.linkedStepId === parent.callId` — library-side
+ *   events (`0-trace.trace`, ...) reference the test-runner step (`test.trace`)
+ *   they belong to via their `stepId` field. Without this edge, removing a
+ *   step from `test.trace` leaves its underlying `call@N` events (and their
+ *   `log` lines) behind in the library trace, still visible in the viewer and
+ *   dangling by `stepId`. This is essential for scripts that do NOT use
+ *   `test.step`, where every action exists as a `pw:api@N` runner step plus a
+ *   linked library `call@N`.
  */
-function collectDescendantCallIds(
-  steps: NdjsonStep[],
-  rootCallIds: Set<string>
-): Set<string> {
-  const childrenByParent = new Map<string, string[]>();
-  for (const step of steps) {
+function collectDescendantSteps(
+  allSteps: NdjsonStep[],
+  roots: Set<NdjsonStep>
+): Set<NdjsonStep> {
+  // parent (file-scoped callId) → children within the same file
+  const childrenByParent = new Map<string, NdjsonStep[]>();
+  // parent callId (any file) → cross-file linked children
+  const linkedByStepId = new Map<string, NdjsonStep[]>();
+
+  for (const step of allSteps) {
     if (step.parentId) {
-      const list = childrenByParent.get(step.parentId) ?? [];
-      list.push(step.callId);
-      childrenByParent.set(step.parentId, list);
+      const key = fileScopedId(step.file, step.parentId);
+      const list = childrenByParent.get(key) ?? [];
+      list.push(step);
+      childrenByParent.set(key, list);
+    }
+    if (step.linkedStepId) {
+      const list = linkedByStepId.get(step.linkedStepId) ?? [];
+      list.push(step);
+      linkedByStepId.set(step.linkedStepId, list);
     }
   }
 
-  const descendants = new Set<string>();
-  const queue = [...rootCallIds];
+  const descendants = new Set<NdjsonStep>();
+  const queue = [...roots];
   while (queue.length > 0) {
     const current = queue.pop()!;
-    for (const child of childrenByParent.get(current) ?? []) {
-      if (!descendants.has(child) && !rootCallIds.has(child)) {
+    const children = [
+      ...(childrenByParent.get(fileScopedId(current.file, current.callId)) ?? []),
+      ...(linkedByStepId.get(current.callId) ?? []).filter(
+        (s) => s.file !== current.file || s.callId !== current.callId
+      ),
+    ];
+    for (const child of children) {
+      if (!descendants.has(child) && !roots.has(child)) {
         descendants.add(child);
         queue.push(child);
       }
@@ -192,130 +236,192 @@ function collectDescendantCallIds(
   return descendants;
 }
 
+/** Unique key for a callId within one file (callIds repeat across files). */
+function fileScopedId(file: NdjsonFile, callId: string): string {
+  return `${file.name} ${callId}`;
+}
+
 /**
- * Applies removal rules to one NDJSON `.trace` file.
+ * Applies removal rules to ALL NDJSON `.trace` files of an archive as one
+ * step graph.
  *
- * - Rules are matched against the `"before"` events (title / method / params).
- * - `orphanStrategy: 'keep-shell'` keeps the matched step's own before/after
- *   lines but removes all descendant events.
- * - `orphanStrategy: 'remove-children'` removes the matched step and all
- *   descendants (both `"before"` and paired `"after"` lines).
- * - `timestampStrategy` is applied to the surviving steps' `startTime` /
- *   `endTime` (and `monotonicTime` where present) via {@link repairTimestamps}.
+ * - Rules are matched against the `"before"` events per file (title /
+ *   apiName / method / params), preserving `minConsecutiveOccurrences`
+ *   semantics within each file's step order.
+ * - Descendants are expanded across files via {@link collectDescendantSteps}
+ *   — this is what removes the library-side `call@N` events (and their `log`
+ *   lines) in `0-trace.trace` when the matched step lives in `test.trace`,
+ *   which is the only place the step tree exists for scripts that never call
+ *   `test.step`.
+ * - `orphanStrategy: 'keep-shell'` keeps each matched step's own before/after
+ *   lines but removes all descendant events; `'remove-children'` removes the
+ *   matched steps too.
+ * - `timestampStrategy` is applied per file to the surviving steps'
+ *   `startTime` / `endTime` (and `monotonicTime` where present) via
+ *   {@link repairTimestamps}.
  *
- * @returns Whether the file was modified plus the callIds of removed steps
- *   (used to drop correlated `*.network` events).
+ * @returns Whether any file was modified, the removed callIds grouped by
+ *   file, and the URLs of removed steps (used to drop correlated
+ *   `*.network` resource snapshots, which carry no callId).
  */
-function applyRemovalToTraceFile(
-  file: NdjsonFile,
+function applyRemovalToTraceFiles(
+  traceFiles: NdjsonFile[],
   rules: RemoveRule[],
   config: SanitizerConfig,
   result: ProcessResult,
   inputPath: string
-): { modified: boolean; removedCallIds: Set<string> } {
-  const none = { modified: false, removedCallIds: new Set<string>() };
-  const steps = collectSteps(file);
-  if (steps.length === 0) return none;
+): {
+  modified: boolean;
+  removedCallIdsByFile: Map<NdjsonFile, Set<string>>;
+  removedUrls: Set<string>;
+} {
+  const none = {
+    modified: false,
+    removedCallIdsByFile: new Map<NdjsonFile, Set<string>>(),
+    removedUrls: new Set<string>(),
+  };
 
-  const syntheticEvents = steps.map((s) => s.synthetic);
-  const removalSet = findStepsToRemove(syntheticEvents, rules);
-  result.safetyGuardWarnings.push(...removalSet.safetyGuardWarnings);
+  // ── Per-file step collection and rule matching ──
+  const stepsByFile = new Map<NdjsonFile, NdjsonStep[]>();
+  const allSteps: NdjsonStep[] = [];
+  const matched = new Set<NdjsonStep>();
+  let totalMatched = 0;
 
-  if (removalSet.indices.size === 0) return none;
+  for (const file of traceFiles) {
+    const steps = collectSteps(file);
+    stepsByFile.set(file, steps);
+    allSteps.push(...steps);
+    if (steps.length === 0) continue;
+
+    const removalSet = findStepsToRemove(steps.map((s) => s.synthetic), rules);
+    result.safetyGuardWarnings.push(...removalSet.safetyGuardWarnings);
+    if (removalSet.indices.size === 0) continue;
+
+    totalMatched += removalSet.indices.size;
+    result.removalMatches.push(...removalSet.matches);
+
+    if (config.remove?.dryRun) {
+      logger.info(
+        `[DRY RUN] Would remove ${removalSet.indices.size} steps from ${inputPath} (${file.name})`
+      );
+      for (const m of removalSet.matches) {
+        logger.info(
+          `  - Rule "${m.ruleLabel}": step at index ${m.index} ` +
+          `("${m.event.title ?? m.event.action ?? 'unknown'}")`
+        );
+      }
+      continue;
+    }
+
+    for (const idx of removalSet.indices) {
+      matched.add(steps[idx]!);
+    }
+  }
+
+  if (totalMatched === 0) return none;
 
   if (config.remove?.dryRun) {
-    logger.info(
-      `[DRY RUN] Would remove ${removalSet.indices.size} steps from ${inputPath} (${file.name})`
-    );
-    for (const m of removalSet.matches) {
-      logger.info(
-        `  - Rule "${m.ruleLabel}": step at index ${m.index} ` +
-        `("${m.event.title ?? m.event.action ?? 'unknown'}")`
-      );
-    }
-    result.removalMatches.push(...removalSet.matches);
-    result.stepsRemoved += removalSet.indices.size;
+    result.stepsRemoved += totalMatched;
     return none;
   }
 
+  // ── Expand to descendants across the whole archive ──
   const orphanStrategy = config.remove?.orphanStrategy ?? 'remove-children';
-
-  const matchedCallIds = new Set<string>();
-  for (const idx of removalSet.indices) {
-    matchedCallIds.add(steps[idx]!.callId);
-  }
-  const descendantCallIds = collectDescendantCallIds(steps, matchedCallIds);
+  const descendants = collectDescendantSteps(allSteps, matched);
 
   // keep-shell: keep the matched steps' own before/after events, drop descendants.
   // remove-children: drop matched steps AND descendants.
-  const removedCallIds = new Set<string>(descendantCallIds);
+  const removedSteps = new Set<NdjsonStep>(descendants);
   if (orphanStrategy !== 'keep-shell') {
-    for (const id of matchedCallIds) removedCallIds.add(id);
+    for (const s of matched) removedSteps.add(s);
   }
 
-  if (removedCallIds.size === 0) {
-    result.removalMatches.push(...removalSet.matches);
-    return none;
-  }
+  if (removedSteps.size === 0) return none;
 
-  // Drop every event line belonging to a removed step (before, after, and any
-  // auxiliary events such as logs that carry the same callId).
-  for (const line of file.lines) {
-    if (!line.obj) continue;
-    const callId = lineCallId(line.obj);
-    if (callId && removedCallIds.has(callId)) {
-      line.removed = true;
+  // URLs of removed steps — used to drop matching *.network resource
+  // snapshots, which have no callId to correlate on.
+  const removedUrls = new Set<string>();
+  const removedCallIdsByFile = new Map<NdjsonFile, Set<string>>();
+  for (const s of removedSteps) {
+    if (typeof s.synthetic.url === 'string') removedUrls.add(s.synthetic.url);
+    let set = removedCallIdsByFile.get(s.file);
+    if (!set) {
+      set = new Set<string>();
+      removedCallIdsByFile.set(s.file, set);
     }
+    set.add(s.callId);
   }
 
-  // ── Timestamp repair ──
+  // ── Drop lines and repair timestamps, per file ──
   const strategy = config.remove?.timestampStrategy ?? 'absorb-into-prev';
-  const survivors = steps.filter((s) => !removedCallIds.has(s.callId));
-  const removedSteps = steps.filter((s) => removedCallIds.has(s.callId));
-
-  // Clone synthetic events so the repair never mutates our originals.
-  const survivorClones: TraceEvent[] = survivors.map((s) => ({ ...s.synthetic }));
-  const removedClones: TraceEvent[] = removedSteps.map((s) => ({ ...s.synthetic }));
-  const repaired = repairTimestamps(survivorClones, removedClones, strategy);
-
-  const repairedByCallId = new Map<string, TraceEvent>();
-  for (const e of repaired) {
-    if (e.callId) repairedByCallId.set(e.callId, e);
-  }
-
   let timestampRepairs = 0;
-  for (const step of survivors) {
-    const fixed = repairedByCallId.get(step.callId);
-    if (!fixed) continue;
 
-    if (fixed.startTime !== step.synthetic.startTime) {
-      const beforeLine = file.lines[step.beforeIndex]!;
-      if (beforeLine.obj) {
-        beforeLine.obj['startTime'] = fixed.startTime;
-        if (typeof beforeLine.obj['monotonicTime'] === 'number') {
-          beforeLine.obj['monotonicTime'] = fixed.startTime;
-        }
-        beforeLine.dirty = true;
-        timestampRepairs++;
+  for (const [file, removedIds] of removedCallIdsByFile) {
+    // Drop every event line belonging to a removed step (before, after, and
+    // any auxiliary events such as logs that carry the same callId).
+    for (const line of file.lines) {
+      if (!line.obj) continue;
+      const callId = lineCallId(line.obj);
+      if (callId && removedIds.has(callId)) {
+        line.removed = true;
       }
     }
-    if (fixed.endTime !== step.synthetic.endTime && step.afterIndex >= 0) {
-      const afterLine = file.lines[step.afterIndex]!;
-      if (afterLine.obj) {
-        afterLine.obj['endTime'] = fixed.endTime;
-        if (typeof afterLine.obj['monotonicTime'] === 'number') {
-          afterLine.obj['monotonicTime'] = fixed.endTime;
+
+    const steps = stepsByFile.get(file)!;
+    const survivors = steps.filter((s) => !removedIds.has(s.callId));
+    const removed = steps.filter((s) => removedIds.has(s.callId));
+
+    // Clone synthetic events so the repair never mutates our originals.
+    //
+    // keep-shell: the matched titled step is KEPT with its original span — it
+    // is the roll-up of the hidden children, whose time it still covers. No
+    // hole appears in the timeline, so no duration may be absorbed into
+    // neighbours (doing so would inflate the timeline). Passing an empty
+    // removed list limits the repair to parent-span recomputation.
+    const survivorClones: TraceEvent[] = survivors.map((s) => ({ ...s.synthetic }));
+    const removedClones: TraceEvent[] =
+      orphanStrategy === 'keep-shell'
+        ? []
+        : removed.map((s) => ({ ...s.synthetic }));
+    const repaired = repairTimestamps(survivorClones, removedClones, strategy);
+
+    const repairedByCallId = new Map<string, TraceEvent>();
+    for (const e of repaired) {
+      if (e.callId) repairedByCallId.set(e.callId, e);
+    }
+
+    for (const step of survivors) {
+      const fixed = repairedByCallId.get(step.callId);
+      if (!fixed) continue;
+
+      if (fixed.startTime !== step.synthetic.startTime) {
+        const beforeLine = file.lines[step.beforeIndex]!;
+        if (beforeLine.obj) {
+          beforeLine.obj['startTime'] = fixed.startTime;
+          if (typeof beforeLine.obj['monotonicTime'] === 'number') {
+            beforeLine.obj['monotonicTime'] = fixed.startTime;
+          }
+          beforeLine.dirty = true;
+          timestampRepairs++;
         }
-        afterLine.dirty = true;
-        timestampRepairs++;
+      }
+      if (fixed.endTime !== step.synthetic.endTime && step.afterIndex >= 0) {
+        const afterLine = file.lines[step.afterIndex]!;
+        if (afterLine.obj) {
+          afterLine.obj['endTime'] = fixed.endTime;
+          if (typeof afterLine.obj['monotonicTime'] === 'number') {
+            afterLine.obj['monotonicTime'] = fixed.endTime;
+          }
+          afterLine.dirty = true;
+          timestampRepairs++;
+        }
       }
     }
   }
 
-  result.stepsRemoved += removedCallIds.size;
+  result.stepsRemoved += removedSteps.size;
   result.timestampRepairs += timestampRepairs;
-  result.removalMatches.push(...removalSet.matches);
-  return { modified: true, removedCallIds };
+  return { modified: true, removedCallIdsByFile, removedUrls };
 }
 
 /**
@@ -332,11 +438,16 @@ function applyRemovalToTraceFile(
  * 2. Parse every `*.trace` and `*.network` entry as NDJSON.
  * 3. **Redact phase**: walk and redact each parsed event line, plus
  *    `.json` / `.txt` files inside `resources/`.
- * 4. **Remove phase**: match rules against `"before"` event titles in each
- *    `*.trace` file; drop matched steps and/or their descendant events
- *    according to `orphanStrategy`; repair timestamps according to
- *    `timestampStrategy`. Matching `*.network` events (same `callId`) are
- *    dropped as well.
+ * 4. **Remove phase**: match rules against `"before"` events in each
+ *    `*.trace` file, then treat ALL `.trace` files as one step graph —
+ *    library-side events (`0-trace.trace`, ...) are linked to their
+ *    test-runner step (`test.trace`) via their `stepId` field, so removing a
+ *    step also removes its underlying `call@N` / `log` events even for
+ *    scripts that never use `test.step`. Drop matched steps and/or their
+ *    descendant events according to `orphanStrategy`; repair timestamps
+ *    according to `timestampStrategy`. Correlated `*.network` events are
+ *    dropped by `callId` and, for `resource-snapshot` entries (which carry
+ *    no callId), by removed-step URL.
  * 5. **Screenshot redaction phase** (optional, requires `sharp`).
  * 6. Write back NDJSON preserving the line order of untouched events, re-zip
  *    and write according to `config.output.mode`.
@@ -512,26 +623,45 @@ export async function processTraceFile(
 
   // ── Remove phase ──
   if (config.remove && rules.length > 0) {
+    const traceFiles = ndjsonFiles.filter((f) => f.name.endsWith('.trace'));
+    const { modified: removalModified, removedCallIdsByFile, removedUrls } =
+      applyRemovalToTraceFiles(traceFiles, rules, config, result, inputPath);
+    if (removalModified) modified = true;
+
+    // Drop network events tied to removed steps. Two correlation paths:
+    // - by callId (events that carry one);
+    // - by request URL — `resource-snapshot` entries have NO callId, so they
+    //   are matched against the URLs of the removed steps instead. Note this
+    //   drops every snapshot for a removed URL, which is the intent for the
+    //   noisy repeated endpoints removal rules typically target.
     const allRemovedCallIds = new Set<string>();
-    for (const file of ndjsonFiles) {
-      if (!file.name.endsWith('.trace')) continue;
-      const { modified: fileModified, removedCallIds } = applyRemovalToTraceFile(
-        file, rules, config, result, inputPath
-      );
-      if (fileModified) modified = true;
-      for (const id of removedCallIds) allRemovedCallIds.add(id);
+    for (const ids of removedCallIdsByFile.values()) {
+      for (const id of ids) allRemovedCallIds.add(id);
     }
 
-    // Drop network events tied to removed steps (matched by callId).
-    if (allRemovedCallIds.size > 0) {
+    if (allRemovedCallIds.size > 0 || removedUrls.size > 0) {
       for (const file of ndjsonFiles) {
         if (!file.name.endsWith('.network')) continue;
         for (const line of file.lines) {
           if (!line.obj) continue;
+
           const callId = lineCallId(line.obj);
           if (callId && allRemovedCallIds.has(callId)) {
             line.removed = true;
             modified = true;
+            continue;
+          }
+
+          const snapshot = line.obj['snapshot'];
+          if (snapshot && typeof snapshot === 'object') {
+            const request = (snapshot as Record<string, unknown>)['request'];
+            if (request && typeof request === 'object') {
+              const url = (request as Record<string, unknown>)['url'];
+              if (typeof url === 'string' && removedUrls.has(url)) {
+                line.removed = true;
+                modified = true;
+              }
+            }
           }
         }
       }
@@ -762,7 +892,13 @@ async function processLegacyTraceJson(
         const actuallyRemovedEvents = traceEvents.filter((e) => !cleanedSet.has(e));
 
         const strategy = config.remove.timestampStrategy ?? 'absorb-into-prev';
-        traceEvents = repairTimestamps(cleaned, actuallyRemovedEvents, strategy);
+        // keep-shell: kept parents still span the hidden children's time — no
+        // timeline hole exists, so nothing may be absorbed into neighbours.
+        traceEvents = repairTimestamps(
+          cleaned,
+          orphanStrategy === 'keep-shell' ? [] : actuallyRemovedEvents,
+          strategy
+        );
 
         if (networkData && removedRequestIds.size > 0) {
           networkData = networkData.filter((entry) => {
