@@ -297,9 +297,21 @@ export async function processHtmlReport(
   }
 
   // Legacy fallback: plain-JSON window.__pw_report_data__ blob.
-  return processLegacyReportData(
-    html, inputPath, outputPath, config, patterns, rules, result
+  if (REPORT_DATA_REGEX.test(html)) {
+    return processLegacyReportData(
+      html, inputPath, outputPath, config, patterns, rules, result
+    );
+  }
+
+  // No report payload marker at all. This is expected for the static
+  // trace-viewer app assets Playwright ships inside the report directory
+  // (playwright-report/trace/index.html, uiMode.html, snapshot.html, ...),
+  // so it is logged at verbose level rather than as a warning.
+  logger.verbose(
+    `No embedded report payload found in ${inputPath} — skipping ` +
+    `(likely a static asset such as the trace viewer app, not a report).`
   );
+  return result;
 }
 
 /**
