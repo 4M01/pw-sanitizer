@@ -1,11 +1,12 @@
 import * as fs from 'node:fs';
-import * as path from 'node:path';
+import JSZip from 'jszip';
 import type {
   SanitizerConfig,
   RedactPattern,
   RemoveRule,
   ProcessResult,
   TraceEvent,
+  TimestampStrategy,
 } from '../config/types.js';
 import { walkAndRedact } from '../redact/json-walker.js';
 import { findStepsToRemove } from '../remove/detector.js';
@@ -15,39 +16,255 @@ import { logger } from '../logger.js';
 import { writeOutput } from '../utils.js';
 
 /**
- * Regex that locates the embedded JSON blob inside a Playwright HTML report.
+ * Playwright's HTML reporter (>= 1.40, verified against 1.40–1.61) embeds all
+ * report data as a base64-encoded zip. Two embedding styles exist:
  *
- * Playwright injects report data as:
- * `window.__pw_report_data__ = { ... };</script>`
+ * - Older versions (~1.40): a script assignment
+ *   `window.playwrightReportBase64 = "data:application/zip;base64,<...>";`
+ * - Newer versions: a template element
+ *   `<template id="playwrightReportBase64">data:application/zip;base64,<...></template>`
  *
- * The first capture group (`[1]`) contains the raw JSON object literal.
- * The `s` flag allows `.` to match newlines (the blob can be multi-line).
+ * The zip contains `report.json` (aggregate stats) plus one JSON shard per
+ * test file; step trees live in the shards as nested
+ * `{ title, duration, steps: [...] }` objects.
+ */
+const WINDOW_BASE64_REGEX =
+  /(window\.playwrightReportBase64\s*=\s*")data:application\/zip;base64,([A-Za-z0-9+/=]*)(";)/;
+
+const TEMPLATE_BASE64_REGEX =
+  /(<template id="playwrightReportBase64">)data:application\/zip;base64,([^<]*)(<\/template>)/;
+
+/**
+ * Legacy regex kept as a fallback for pre-base64 report formats that embedded
+ * plain JSON as `window.__pw_report_data__ = {...};</script>`.
  */
 const REPORT_DATA_REGEX =
   /window\.__pw_report_data__\s*=\s*(\{.+?\});\s*<\/script>/s;
 
+/** Nested step node inside an HTML report shard. */
+interface ReportStepNode {
+  title?: string;
+  startTime?: string;
+  duration?: number;
+  steps?: ReportStepNode[];
+  count?: number;
+  [key: string]: unknown;
+}
+
+/** Mutable counters shared across the recursive shard walk. */
+interface RemovalCounters {
+  stepsRemoved: number;
+  timestampRepairs: number;
+  mutations: number;
+}
+
+/** Counts a node and all of its descendants. */
+function countStepNodes(steps: ReportStepNode[] | undefined): number {
+  if (!steps) return 0;
+  let n = 0;
+  for (const s of steps) {
+    n += 1 + countStepNodes(s.steps);
+  }
+  return n;
+}
+
+/** Parses a shard step's startTime (ISO string) into epoch ms; NaN-safe. */
+function stepStartMs(step: ReportStepNode): number {
+  const t = typeof step.startTime === 'string' ? Date.parse(step.startTime) : NaN;
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * Applies removal rules to one nested `steps` array of a report shard
+ * (recursively). Returns the filtered array.
+ *
+ * - `keep-shell`: the matched step node itself is kept; its `steps` array is
+ *   emptied and count-related fields are reset.
+ * - `remove-children`: the matched node (and implicitly its whole subtree)
+ *   is removed from the array; sibling timestamps are repaired according to
+ *   `timestampStrategy` (`absorb-into-prev` extends the previous sibling's
+ *   duration, `absorb-into-next` shifts and extends the next sibling,
+ *   `gap` leaves a hole).
+ */
+function sanitizeStepTree(
+  steps: ReportStepNode[],
+  rules: RemoveRule[],
+  orphanStrategy: 'remove-children' | 'keep-shell',
+  timestampStrategy: TimestampStrategy,
+  counters: RemovalCounters,
+  result: ProcessResult,
+  dryRun: boolean
+): ReportStepNode[] {
+  if (steps.length === 0) return steps;
+
+  // Build synthetic flat events for this sibling group so the shared detector
+  // (including AND-matcher logic and minConsecutiveOccurrences runs) applies.
+  const synthetic: TraceEvent[] = steps.map((s) => {
+    const start = stepStartMs(s);
+    return {
+      title: s.title,
+      startTime: start,
+      endTime: start + (typeof s.duration === 'number' ? s.duration : 0),
+    };
+  });
+
+  const removalSet = findStepsToRemove(synthetic, rules);
+  result.safetyGuardWarnings.push(...removalSet.safetyGuardWarnings);
+
+  const matchedIndices = removalSet.indices;
+  if (matchedIndices.size > 0) {
+    result.removalMatches.push(...removalSet.matches);
+  }
+
+  if (dryRun) {
+    // Report matches but do not mutate; still recurse to report nested matches.
+    for (const i of matchedIndices) {
+      const s = steps[i]!;
+      counters.stepsRemoved +=
+        orphanStrategy === 'keep-shell'
+          ? countStepNodes(s.steps)
+          : 1 + countStepNodes(s.steps);
+    }
+    steps.forEach((s, i) => {
+      if (!matchedIndices.has(i) && s.steps) {
+        sanitizeStepTree(s.steps, rules, orphanStrategy, timestampStrategy, counters, result, dryRun);
+      }
+    });
+    return steps;
+  }
+
+  const output: ReportStepNode[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]!;
+
+    if (matchedIndices.has(i)) {
+      if (orphanStrategy === 'keep-shell') {
+        // Keep the matched node as a hollow shell: empty its children and
+        // reset count-related fields, but preserve its own duration.
+        counters.stepsRemoved += countStepNodes(step.steps);
+        counters.mutations++;
+        step.steps = [];
+        if (typeof step.count === 'number') step.count = 1;
+        output.push(step);
+      } else {
+        // remove-children: drop the whole subtree.
+        counters.stepsRemoved += 1 + countStepNodes(step.steps);
+        counters.mutations++;
+
+        const removedDuration = typeof step.duration === 'number' ? step.duration : 0;
+        if (removedDuration > 0 && timestampStrategy !== 'gap') {
+          if (timestampStrategy === 'absorb-into-next') {
+            const next = steps
+              .slice(i + 1)
+              .find((s, j) => !matchedIndices.has(i + 1 + j));
+            if (next) {
+              if (typeof next.startTime === 'string') {
+                const t = Date.parse(next.startTime);
+                if (Number.isFinite(t)) {
+                  next.startTime = new Date(t - removedDuration).toISOString();
+                }
+              }
+              if (typeof next.duration === 'number') next.duration += removedDuration;
+              counters.timestampRepairs++;
+            } else if (output.length > 0) {
+              const prev = output[output.length - 1]!;
+              if (typeof prev.duration === 'number') prev.duration += removedDuration;
+              counters.timestampRepairs++;
+            }
+          } else {
+            // absorb-into-prev (default)
+            const prev = output.length > 0 ? output[output.length - 1] : undefined;
+            if (prev && typeof prev.duration === 'number') {
+              prev.duration += removedDuration;
+              counters.timestampRepairs++;
+            } else {
+              const next = steps
+                .slice(i + 1)
+                .find((s, j) => !matchedIndices.has(i + 1 + j));
+              if (next) {
+                if (typeof next.startTime === 'string') {
+                  const t = Date.parse(next.startTime);
+                  if (Number.isFinite(t)) {
+                    next.startTime = new Date(t - removedDuration).toISOString();
+                  }
+                }
+                if (typeof next.duration === 'number') next.duration += removedDuration;
+                counters.timestampRepairs++;
+              }
+            }
+          }
+        }
+      }
+      continue;
+    }
+
+    // Not matched — recurse into children.
+    if (Array.isArray(step.steps) && step.steps.length > 0) {
+      step.steps = sanitizeStepTree(
+        step.steps, rules, orphanStrategy, timestampStrategy, counters, result, dryRun
+      );
+    }
+    output.push(step);
+  }
+
+  return output;
+}
+
+/**
+ * Applies removal rules to all step trees found in a parsed shard JSON.
+ * Shards contain `tests[].results[].steps` (each step may nest further).
+ */
+function sanitizeShard(
+  shard: unknown,
+  rules: RemoveRule[],
+  orphanStrategy: 'remove-children' | 'keep-shell',
+  timestampStrategy: TimestampStrategy,
+  counters: RemovalCounters,
+  result: ProcessResult,
+  dryRun: boolean
+): boolean {
+  if (!shard || typeof shard !== 'object') return false;
+  const before = counters.mutations;
+
+  const tests = (shard as Record<string, unknown>)['tests'];
+  if (!Array.isArray(tests)) return false;
+
+  for (const test of tests) {
+    if (!test || typeof test !== 'object') continue;
+    const results = (test as Record<string, unknown>)['results'];
+    if (!Array.isArray(results)) continue;
+    for (const res of results) {
+      if (!res || typeof res !== 'object') continue;
+      const resObj = res as Record<string, unknown>;
+      if (Array.isArray(resObj['steps'])) {
+        resObj['steps'] = sanitizeStepTree(
+          resObj['steps'] as ReportStepNode[],
+          rules, orphanStrategy, timestampStrategy, counters, result, dryRun
+        );
+      }
+    }
+  }
+
+  return counters.mutations > before;
+}
+
 /**
  * Sanitizes a single Playwright HTML report file.
  *
- * Processing pipeline:
- * 1. Read the HTML file from disk.
- * 2. Extract the embedded `window.__pw_report_data__` JSON blob via regex.
- * 3. **Redact phase** (if `config.redact` is set and patterns are loaded):
- *    walk the JSON tree with {@link walkAndRedact} and replace matched values.
- * 4. **Remove phase** (if `config.remove` is set and rules are loaded):
- *    extract step events, run {@link findStepsToRemove}, then
- *    {@link removeSteps} and {@link repairTimestamps}.
- * 5. Re-serialise the JSON and splice it back into the original HTML.
- * 6. Write the output according to `config.output.mode`.
+ * Supports the **real Playwright HTML report format** (>= 1.40): the report
+ * data is embedded as a base64-encoded zip (see {@link WINDOW_BASE64_REGEX}
+ * and {@link TEMPLATE_BASE64_REGEX}). The zip is decoded, its `report.json`
+ * and per-test-file JSON shards are redacted and step-pruned, then it is
+ * re-zipped, re-encoded, and substituted back into the HTML.
  *
- * On any unrecoverable parse error, the function logs a warning and returns
- * an empty {@link ProcessResult} rather than throwing.
+ * **Legacy fallback:** reports embedding plain JSON via
+ * `window.__pw_report_data__` are still processed through the original path.
  *
  * @param inputPath  - Absolute path to the source HTML report file.
  * @param outputPath - Destination path for the sanitized output.
  * @param config     - The full sanitizer configuration.
- * @param patterns   - Pre-built list of redact patterns (from {@link buildPatternRegistry}).
- * @param rules      - Pre-built list of removal rules (from {@link buildRuleRegistry}).
+ * @param patterns   - Pre-built list of redact patterns.
+ * @param rules      - Pre-built list of removal rules.
  * @returns A {@link ProcessResult} with counts and match details for this file.
  */
 export async function processHtmlReport(
@@ -68,12 +285,177 @@ export async function processHtmlReport(
   };
 
   const html = fs.readFileSync(inputPath, 'utf-8');
+
+  // Try the real (base64 zip) format first — window assignment, then template.
+  const base64Match =
+    WINDOW_BASE64_REGEX.exec(html) ?? TEMPLATE_BASE64_REGEX.exec(html);
+
+  if (base64Match) {
+    return processBase64Report(
+      html, base64Match, inputPath, outputPath, config, patterns, rules, result
+    );
+  }
+
+  // Legacy fallback: plain-JSON window.__pw_report_data__ blob.
+  return processLegacyReportData(
+    html, inputPath, outputPath, config, patterns, rules, result
+  );
+}
+
+/**
+ * Processes the modern base64-zip report format.
+ *
+ * @param base64Match - Regex match with groups: [1] prefix, [2] base64 payload, [3] suffix.
+ */
+async function processBase64Report(
+  html: string,
+  base64Match: RegExpExecArray,
+  inputPath: string,
+  outputPath: string,
+  config: SanitizerConfig,
+  patterns: RedactPattern[],
+  rules: RemoveRule[],
+  result: ProcessResult
+): Promise<ProcessResult> {
+  const [fullMatch, prefix, base64Payload, suffix] = base64Match;
+
+  let zip: JSZip;
+  try {
+    zip = await JSZip.loadAsync(Buffer.from(base64Payload!, 'base64'));
+  } catch (err) {
+    logger.warn(
+      `Failed to decode embedded report zip in ${inputPath}: ` +
+      `${err instanceof Error ? err.message : String(err)}`
+    );
+    return result;
+  }
+
+  // Parse every JSON entry (report.json + one shard per test file).
+  const entries: Array<{ name: string; data: unknown; modified: boolean }> = [];
+  const entryNames: string[] = [];
+  zip.forEach((relativePath, entry) => {
+    if (!entry.dir) entryNames.push(relativePath);
+  });
+
+  for (const name of entryNames) {
+    if (!name.endsWith('.json')) continue;
+    const entry = zip.file(name);
+    if (!entry) continue;
+    try {
+      const content = await entry.async('string');
+      entries.push({ name, data: JSON.parse(content), modified: false });
+    } catch (err) {
+      logger.warn(
+        `Failed to parse ${name} inside report zip of ${inputPath}: ` +
+        `${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  if (entries.length === 0) {
+    logger.warn(`No JSON entries found inside embedded report zip of ${inputPath}.`);
+    return result;
+  }
+
+  let modified = false;
+  const dryRun = config.remove?.dryRun ?? false;
+
+  // ── Redact phase ──
+  if (config.redact && patterns.length > 0) {
+    for (const entry of entries) {
+      const walk = walkAndRedact(entry.data, patterns, config.redact);
+      if (walk.count > 0) {
+        entry.data = walk.result;
+        entry.modified = true;
+        result.redactionsApplied += walk.count;
+        result.redactionMatches.push(...walk.matches);
+        modified = true;
+      }
+    }
+  }
+
+  // ── Remove phase ──
+  if (config.remove && rules.length > 0) {
+    const orphanStrategy = config.remove.orphanStrategy ?? 'remove-children';
+    const timestampStrategy = config.remove.timestampStrategy ?? 'absorb-into-prev';
+    const counters: RemovalCounters = { stepsRemoved: 0, timestampRepairs: 0, mutations: 0 };
+
+    for (const entry of entries) {
+      if (entry.name === 'report.json') continue; // no step trees in the aggregate
+      const changed = sanitizeShard(
+        entry.data, rules, orphanStrategy, timestampStrategy, counters, result, dryRun
+      );
+      if (changed && !dryRun) {
+        entry.modified = true;
+        modified = true;
+      }
+    }
+
+    result.stepsRemoved += counters.stepsRemoved;
+    result.timestampRepairs += counters.timestampRepairs;
+
+    if (dryRun && counters.stepsRemoved > 0) {
+      logger.info(
+        `[DRY RUN] Would remove ${counters.stepsRemoved} steps from ${inputPath}`
+      );
+      for (const m of result.removalMatches) {
+        logger.info(
+          `  - Rule "${m.ruleLabel}": step "${m.event.title ?? 'unknown'}"`
+        );
+      }
+    }
+  }
+
+  if (!modified && !dryRun) {
+    logger.info(`No changes made to ${inputPath}`);
+  }
+
+  // Write output (unless dry-run)
+  if (!dryRun) {
+    for (const entry of entries) {
+      if (entry.modified) {
+        zip.file(entry.name, JSON.stringify(entry.data));
+      }
+    }
+
+    const newBase64 = await zip.generateAsync({
+      type: 'base64',
+      compression: 'DEFLATE',
+    });
+
+    const replacement = `${prefix}data:application/zip;base64,${newBase64}${suffix}`;
+    const newHtml =
+      html.slice(0, base64Match.index) +
+      replacement +
+      html.slice(base64Match.index + fullMatch!.length);
+
+    writeOutput(inputPath, outputPath, newHtml, config);
+  }
+
+  return result;
+}
+
+/**
+ * Legacy processing path for reports that embed plain JSON via
+ * `window.__pw_report_data__ = {...};`. Kept for backwards compatibility.
+ */
+function processLegacyReportData(
+  html: string,
+  inputPath: string,
+  outputPath: string,
+  config: SanitizerConfig,
+  patterns: RedactPattern[],
+  rules: RemoveRule[],
+  result: ProcessResult
+): ProcessResult {
   const match = REPORT_DATA_REGEX.exec(html);
 
   if (!match?.[1]) {
     logger.warn(
       `Could not find embedded report data in ${inputPath}. ` +
-      `Expected pattern: window.__pw_report_data__ = {...};`
+      `Expected a base64 report payload (window.playwrightReportBase64 / ` +
+      `<template id="playwrightReportBase64">) or legacy ` +
+      `window.__pw_report_data__ = {...};`
     );
     return result;
   }
@@ -104,12 +486,9 @@ export async function processHtmlReport(
 
   // Remove phase
   if (config.remove && rules.length > 0) {
-    // The report data typically has a structure with tests/suites containing steps
     const events = extractEventsFromReport(reportData);
     if (events.length > 0) {
       const removalSet = findStepsToRemove(events, rules);
-
-      // Always propagate safety warnings regardless of whether removal runs
       result.safetyGuardWarnings.push(...removalSet.safetyGuardWarnings);
 
       if (removalSet.indices.size > 0) {
@@ -127,28 +506,19 @@ export async function processHtmlReport(
           result.stepsRemoved = removalSet.indices.size;
         } else {
           const orphanStrategy = config.remove.orphanStrategy ?? 'remove-children';
-
-          // Remove steps — orphanStrategy controls whether matched parents or only
-          // their children are dropped from the flat events array.
           const cleaned = removeSteps(events, removalSet, orphanStrategy);
           const strategy = config.remove.timestampStrategy ?? 'absorb-into-prev';
 
-          // Determine which events were actually removed (set-difference by identity).
-          // For remove-children: matched events + their descendants.
-          // For keep-shell: only the children (matched events are kept).
           const cleanedSet = new Set(cleaned);
           const actuallyRemovedEvents = events.filter((e) => !cleanedSet.has(e));
 
           const repaired = repairTimestamps(cleaned, actuallyRemovedEvents, strategy);
 
-          // Build callId → repaired event for tree timestamp updates
           const repairedByCallId = new Map<string, TraceEvent>();
           for (const e of repaired) {
             if (e.callId) repairedByCallId.set(e.callId, e);
           }
 
-          // For the tree traversal: in keep-shell mode the matched parent objects
-          // stay in the tree — only their children are filtered out.
           const treeEventsToRemove = new Set<object>(actuallyRemovedEvents);
 
           replaceEventsInReport(reportData, treeEventsToRemove, repairedByCallId);
@@ -179,17 +549,8 @@ export async function processHtmlReport(
 }
 
 /**
- * Flattens the nested Playwright HTML report structure into a single array of
+ * Flattens the nested legacy report structure into a single array of
  * step/action events that can be processed by the removal pipeline.
- *
- * Playwright HTML reports nest steps under `suites → tests → results → steps`.
- * This function performs a depth-first traversal, collecting any node that
- * looks like a step (has `startTime`/`endTime`, `title`, or `action` fields)
- * and recursing into known container keys (`steps`, `actions`, `suites`,
- * `tests`, `results`, `attachments`).
- *
- * @param data - The parsed `window.__pw_report_data__` object.
- * @returns A flat array of event-like objects cast to {@link TraceEvent}.
  */
 function extractEventsFromReport(data: unknown): TraceEvent[] {
   const events: TraceEvent[] = [];
@@ -206,7 +567,6 @@ function extractEventsFromReport(data: unknown): TraceEvent[] {
 
     const obj = node as Record<string, unknown>;
 
-    // Check if this looks like a step/action event
     if (
       ('startTime' in obj && 'endTime' in obj) ||
       'title' in obj ||
@@ -215,7 +575,6 @@ function extractEventsFromReport(data: unknown): TraceEvent[] {
       events.push(obj as unknown as TraceEvent);
     }
 
-    // Recurse into common containers
     for (const key of ['steps', 'actions', 'suites', 'tests', 'results', 'attachments']) {
       if (key in obj && Array.isArray(obj[key])) {
         traverse(obj[key]);
@@ -228,19 +587,8 @@ function extractEventsFromReport(data: unknown): TraceEvent[] {
 }
 
 /**
- * Rebuilds the nested step/action arrays in the HTML report tree after removal.
- *
- * Because {@link extractEventsFromReport} returns object **references** that
- * live inside the report tree, `eventsToRemove` can be used as an identity
- * set to filter matching objects directly from the tree's `steps` / `actions`
- * arrays without a separate re-serialisation step.
- *
- * Additionally, repaired timestamps (computed from the flat event array) are
- * applied back to tree nodes that carry a `callId` field.
- *
- * @param data            - The parsed `window.__pw_report_data__` object.
- * @param eventsToRemove  - Set of original event objects to exclude from step arrays.
- * @param repairedByCallId - Map of `callId` → repaired event used to update timestamps.
+ * Rebuilds the nested step/action arrays in the legacy report tree after
+ * removal (identity-based filtering plus timestamp write-back).
  */
 function replaceEventsInReport(
   data: unknown,
@@ -252,7 +600,6 @@ function replaceEventsInReport(
 
     const obj = node as Record<string, unknown>;
 
-    // Apply repaired timestamps to this node when it has a known callId
     if (typeof obj['callId'] === 'string') {
       const repaired = repairedByCallId.get(obj['callId']);
       if (repaired) {
@@ -261,7 +608,6 @@ function replaceEventsInReport(
       }
     }
 
-    // Filter removed events from step/action arrays and recurse into survivors
     for (const key of ['steps', 'actions']) {
       if (Array.isArray(obj[key])) {
         obj[key] = (obj[key] as unknown[]).filter(
@@ -273,7 +619,6 @@ function replaceEventsInReport(
       }
     }
 
-    // Recurse into structural containers (not filtered)
     for (const key of ['suites', 'tests', 'results', 'attachments']) {
       if (Array.isArray(obj[key])) {
         for (const item of obj[key] as unknown[]) {
@@ -285,5 +630,3 @@ function replaceEventsInReport(
 
   traverse(data);
 }
-
-
