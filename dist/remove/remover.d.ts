@@ -1,4 +1,4 @@
-import type { TraceEvent, RemovalSet } from '../config/types.js';
+import type { TraceEvent, RemovalSet, OrphanStrategy } from '../config/types.js';
 /**
  * Removes steps from the events array according to the configured orphan strategy.
  *
@@ -23,11 +23,18 @@ import type { TraceEvent, RemovalSet } from '../config/types.js';
  *
  * The input array is **never mutated** — a new array is always returned.
  *
+ * ### Per-step (mixed) strategies
+ * `orphanStrategy` may be a **function** `(index) => OrphanStrategy` returning
+ * the strategy for each matched index. This lets one pass mix `'keep-shell'`
+ * and `'remove-children'` across different matched steps (per-rule strategies).
+ * A plain string applies the same strategy to every matched step.
+ *
  * @param events          - The ordered list of trace events.
  * @param removalSet      - The set of matched step indices (from {@link findStepsToRemove}).
  * @param orphanStrategy  - How to handle descendants of removed steps.
- *   `'remove-children'` *(default)* or `'keep-shell'`.
+ *   `'remove-children'` *(default)* or `'keep-shell'`, or a per-index resolver
+ *   function for mixed strategies.
  * @returns A new array with the appropriate steps removed.
  */
-export declare function removeSteps(events: TraceEvent[], removalSet: RemovalSet, orphanStrategy?: 'remove-children' | 'keep-shell'): TraceEvent[];
+export declare function removeSteps(events: TraceEvent[], removalSet: RemovalSet, orphanStrategy?: OrphanStrategy | ((index: number) => OrphanStrategy)): TraceEvent[];
 //# sourceMappingURL=remover.d.ts.map

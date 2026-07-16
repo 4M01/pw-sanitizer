@@ -122,6 +122,7 @@ function findStepsToRemove(events, rules) {
                             index: idx,
                             ruleLabel: rule.label,
                             event: events[idx],
+                            rule,
                         });
                     }
                 }
@@ -145,6 +146,7 @@ function findStepsToRemove(events, rules) {
                         index: i,
                         ruleLabel: rule.label,
                         event,
+                        rule,
                     });
                 }
             }

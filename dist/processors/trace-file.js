@@ -42,6 +42,7 @@ const jszip_1 = __importDefault(require("jszip"));
 const json_walker_js_1 = require("../redact/json-walker.js");
 const detector_js_1 = require("../remove/detector.js");
 const remover_js_1 = require("../remove/remover.js");
+const orphan_strategy_js_1 = require("../remove/orphan-strategy.js");
 const timestamp_repair_js_1 = require("../remove/timestamp-repair.js");
 const screenshot_js_1 = require("./screenshot.js");
 const logger_js_1 = require("../logger.js");
@@ -240,6 +241,10 @@ function applyRemovalToTraceFiles(traceFiles, rules, config, result, inputPath) 
     // carried through descendant expansion so the summary's per-rule counts sum
     // to the grand total (see reporter.ts).
     const rootLabels = new Map();
+    // Matched roots → every rule that matched them. A step can be matched by
+    // several rules; the full set is needed to resolve the effective
+    // orphanStrategy (most-destructive-wins) per step.
+    const rootRules = new Map();
     for (const file of traceFiles) {
         const steps = collectSteps(file);
         stepsByFile.set(file, steps);
@@ -250,14 +255,23 @@ function applyRemovalToTraceFiles(traceFiles, rules, config, result, inputPath) 
         result.safetyGuardWarnings.push(...removalSet.safetyGuardWarnings);
         if (removalSet.indices.size === 0)
             continue;
-        // First rule label wins for a given step (labels are only for reporting).
+        // First rule label wins for a given step (labels are only for reporting);
+        // collect ALL matched rules per index for strategy resolution.
         const labelByIndex = new Map();
+        const rulesByIndex = new Map();
         for (const m of removalSet.matches) {
             if (!labelByIndex.has(m.index))
                 labelByIndex.set(m.index, m.ruleLabel);
+            if (m.rule) {
+                const list = rulesByIndex.get(m.index) ?? [];
+                list.push(m.rule);
+                rulesByIndex.set(m.index, list);
+            }
         }
         for (const idx of removalSet.indices) {
-            rootLabels.set(steps[idx], labelByIndex.get(idx) ?? rules[0]?.label ?? 'remove');
+            const step = steps[idx];
+            rootLabels.set(step, labelByIndex.get(idx) ?? rules[0]?.label ?? 'remove');
+            rootRules.set(step, rulesByIndex.get(idx) ?? []);
         }
     }
     if (rootLabels.size === 0)
@@ -282,21 +296,63 @@ function applyRemovalToTraceFiles(traceFiles, rules, config, result, inputPath) 
             if (owner) {
                 if (!rootLabels.has(owner))
                     rootLabels.set(owner, label);
+                // The owner step inherits the leaf's matched rules so its effective
+                // orphanStrategy accounts for the browser-side rule that hit the leaf.
+                const ownerRules = rootRules.get(owner) ?? [];
+                ownerRules.push(...(rootRules.get(leaf) ?? []));
+                rootRules.set(owner, ownerRules);
+                rootRules.delete(leaf);
                 rootLabels.delete(leaf);
             }
         }
     }
-    // ── Expand to descendants across the whole archive ──
-    const orphanStrategy = config.remove?.orphanStrategy ?? 'remove-children';
-    const descendantLabels = collectDescendantSteps(allSteps, rootLabels);
-    // keep-shell: keep the matched steps' own before/after events, drop descendants.
-    // remove-children: drop matched steps AND descendants.
-    const removedLabels = new Map(descendantLabels);
-    if (orphanStrategy !== 'keep-shell') {
-        for (const [s, l] of rootLabels)
-            if (!removedLabels.has(s))
-                removedLabels.set(s, l);
+    // ── Resolve orphanStrategy PER matched root ──
+    // Each root's strategy is `rule.orphanStrategy ?? remove.orphanStrategy ??
+    // 'remove-children'`; when a step is matched by rules that disagree, the most
+    // destructive (remove-children) wins and the conflict is logged at verbose.
+    const globalDefault = config.remove?.orphanStrategy;
+    const keepShellRoots = new Map();
+    const removeChildrenRoots = new Map();
+    for (const [root, label] of rootLabels) {
+        const { strategy, conflict } = (0, orphan_strategy_js_1.resolveOrphanStrategy)(rootRules.get(root) ?? [], globalDefault);
+        if (conflict) {
+            logger_js_1.logger.verbose(`Step "${root.synthetic.title ?? root.callId}" in ${root.file.name} ` +
+                `is matched by rules with conflicting orphanStrategy; the most ` +
+                `destructive ('remove-children') wins.`);
+        }
+        if (strategy === 'keep-shell')
+            keepShellRoots.set(root, label);
+        else
+            removeChildrenRoots.set(root, label);
     }
+    // ── Expand to descendants across the whole archive, per strategy group ──
+    const descOfRemoveChildren = collectDescendantSteps(allSteps, removeChildrenRoots);
+    const descOfKeepShell = collectDescendantSteps(allSteps, keepShellRoots);
+    // Steps whose lines are DROPPED from the archive:
+    //   - every descendant of any matched step (both strategies strip children);
+    //   - the matched step itself ONLY under remove-children (keep-shell keeps
+    //     its own before/after pair as the surviving shell).
+    const removedLabels = new Map();
+    for (const [s, l] of descOfKeepShell)
+        if (!removedLabels.has(s))
+            removedLabels.set(s, l);
+    for (const [s, l] of descOfRemoveChildren)
+        if (!removedLabels.has(s))
+            removedLabels.set(s, l);
+    for (const [s, l] of removeChildrenRoots)
+        if (!removedLabels.has(s))
+            removedLabels.set(s, l);
+    // Steps whose duration leaves a real timeline hole to be absorbed by a
+    // neighbour: remove-children roots and their descendants. Descendants of a
+    // surviving keep-shell shell are excluded — the shell still spans their time,
+    // so absorbing it into neighbours would inflate the timeline.
+    const holeSteps = new Set();
+    for (const s of removeChildrenRoots.keys())
+        holeSteps.add(s);
+    for (const s of descOfRemoveChildren.keys())
+        holeSteps.add(s);
+    for (const s of descOfKeepShell.keys())
+        holeSteps.delete(s);
     // keep-shell on leaf matches (no descendants) legitimately removes nothing.
     // Report zero rather than a phantom count so per-rule totals stay honest.
     if (removedLabels.size === 0)
@@ -346,15 +402,14 @@ function applyRemovalToTraceFiles(traceFiles, rules, config, result, inputPath) 
         const removed = steps.filter((s) => removedIds.has(s.callId));
         // Clone synthetic events so the repair never mutates our originals.
         //
-        // keep-shell: the matched titled step is KEPT with its original span — it
-        // is the roll-up of the hidden children, whose time it still covers. No
-        // hole appears in the timeline, so no duration may be absorbed into
-        // neighbours (doing so would inflate the timeline). Passing an empty
-        // removed list limits the repair to parent-span recomputation.
+        // Only steps in `holeSteps` leave a real gap the neighbours must absorb.
+        // A kept keep-shell step still spans its (now-hidden) children's time, so
+        // those children are NOT holes — passing them would inflate the timeline.
+        // Under mixed strategies this is decided per removed step, not globally.
         const survivorClones = survivors.map((s) => ({ ...s.synthetic }));
-        const removedClones = orphanStrategy === 'keep-shell'
-            ? []
-            : removed.map((s) => ({ ...s.synthetic }));
+        const removedClones = removed
+            .filter((s) => holeSteps.has(s))
+            .map((s) => ({ ...s.synthetic }));
         const repaired = (0, timestamp_repair_js_1.repairTimestamps)(survivorClones, removedClones, strategy);
         const repairedByCallId = new Map();
         for (const e of repaired) {
@@ -913,14 +968,58 @@ async function processLegacyTraceJson(zip, inputPath, outputPath, config, patter
                         removedRequestIds.add(event.requestId);
                     }
                 }
-                const orphanStrategy = config.remove.orphanStrategy ?? 'remove-children';
-                const cleaned = (0, remover_js_1.removeSteps)(traceEvents, removalSet, orphanStrategy);
+                // Resolve orphanStrategy per matched step (per-rule, most-destructive
+                // wins). A step can be matched by several rules.
+                const globalDefault = config.remove.orphanStrategy;
+                const rulesByIndex = new Map();
+                for (const m of removalSet.matches) {
+                    if (m.rule) {
+                        const list = rulesByIndex.get(m.index) ?? [];
+                        list.push(m.rule);
+                        rulesByIndex.set(m.index, list);
+                    }
+                }
+                const strategyByIndex = (idx) => (0, orphan_strategy_js_1.resolveOrphanStrategy)(rulesByIndex.get(idx) ?? [], globalDefault).strategy;
+                for (const idx of removalSet.indices) {
+                    if ((0, orphan_strategy_js_1.resolveOrphanStrategy)(rulesByIndex.get(idx) ?? [], globalDefault).conflict) {
+                        logger_js_1.logger.verbose(`Step at index ${idx} ("${traceEvents[idx]?.title ?? 'unknown'}") ` +
+                            `is matched by rules with conflicting orphanStrategy; the most ` +
+                            `destructive ('remove-children') wins.`);
+                    }
+                }
+                const cleaned = (0, remover_js_1.removeSteps)(traceEvents, removalSet, strategyByIndex);
                 const cleanedSet = new Set(cleaned);
                 const actuallyRemovedEvents = traceEvents.filter((e) => !cleanedSet.has(e));
+                // A removed step leaves an absorbable timeline hole UNLESS it is covered
+                // by a surviving keep-shell ancestor (which still spans its time). Seed
+                // with keep-shell root callIds and propagate down parentId chains.
+                const coveredCallIds = new Set();
+                for (const idx of removalSet.indices) {
+                    if (strategyByIndex(idx) === 'keep-shell') {
+                        const cid = traceEvents[idx]?.callId;
+                        if (typeof cid === 'string')
+                            coveredCallIds.add(cid);
+                    }
+                }
+                const coveredEvents = new Set();
+                let coveredChanged = true;
+                while (coveredChanged) {
+                    coveredChanged = false;
+                    for (const e of actuallyRemovedEvents) {
+                        if (coveredEvents.has(e))
+                            continue;
+                        const pid = typeof e.parentId === 'string' ? e.parentId : undefined;
+                        if (pid && coveredCallIds.has(pid)) {
+                            coveredEvents.add(e);
+                            if (typeof e.callId === 'string')
+                                coveredCallIds.add(e.callId);
+                            coveredChanged = true;
+                        }
+                    }
+                }
+                const holeEvents = actuallyRemovedEvents.filter((e) => !coveredEvents.has(e));
                 const strategy = config.remove.timestampStrategy ?? 'absorb-into-prev';
-                // keep-shell: kept parents still span the hidden children's time — no
-                // timeline hole exists, so nothing may be absorbed into neighbours.
-                traceEvents = (0, timestamp_repair_js_1.repairTimestamps)(cleaned, orphanStrategy === 'keep-shell' ? [] : actuallyRemovedEvents, strategy);
+                traceEvents = (0, timestamp_repair_js_1.repairTimestamps)(cleaned, holeEvents, strategy);
                 if (networkData && removedRequestIds.size > 0) {
                     networkData = networkData.filter((entry) => {
                         if (entry && typeof entry === 'object' && 'requestId' in entry) {

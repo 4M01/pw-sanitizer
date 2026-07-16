@@ -7,10 +7,12 @@ import type {
   ProcessResult,
   TraceEvent,
   TimestampStrategy,
+  OrphanStrategy,
 } from '../config/types.js';
 import { walkAndRedact } from '../redact/json-walker.js';
 import { findStepsToRemove } from '../remove/detector.js';
 import { removeSteps } from '../remove/remover.js';
+import { resolveOrphanStrategy } from '../remove/orphan-strategy.js';
 import { repairTimestamps } from '../remove/timestamp-repair.js';
 import { logger } from '../logger.js';
 import { writeOutput } from '../utils.js';
@@ -85,11 +87,16 @@ function stepStartMs(step: ReportStepNode): number {
  *   `timestampStrategy` (`absorb-into-prev` extends the previous sibling's
  *   duration, `absorb-into-next` shifts and extends the next sibling,
  *   `gap` leaves a hole).
+ *
+ * The strategy is resolved **per matched node** from the rules that matched it
+ * (`rule.orphanStrategy ?? globalOrphanStrategy ?? 'remove-children'`), so one
+ * pass can mix strategies. Conflicting rules on one node resolve to the most
+ * destructive (`remove-children`) and log the conflict at verbose level.
  */
 function sanitizeStepTree(
   steps: ReportStepNode[],
   rules: RemoveRule[],
-  orphanStrategy: 'remove-children' | 'keep-shell',
+  globalOrphanStrategy: OrphanStrategy | undefined,
   timestampStrategy: TimestampStrategy,
   counters: RemovalCounters,
   result: ProcessResult,
@@ -112,8 +119,40 @@ function sanitizeStepTree(
   result.safetyGuardWarnings.push(...removalSet.safetyGuardWarnings);
 
   const matchedIndices = removalSet.indices;
+
+  // Group matched rules per index, and resolve the effective strategy per node.
+  const rulesByIndex = new Map<number, RemoveRule[]>();
+  for (const m of removalSet.matches) {
+    if (m.rule) {
+      const list = rulesByIndex.get(m.index) ?? [];
+      list.push(m.rule);
+      rulesByIndex.set(m.index, list);
+    }
+  }
+  const strategyFor = (i: number): OrphanStrategy => {
+    const { strategy, conflict } = resolveOrphanStrategy(
+      rulesByIndex.get(i) ?? [],
+      globalOrphanStrategy
+    );
+    if (conflict) {
+      logger.verbose(
+        `Step "${steps[i]?.title ?? 'unknown'}" is matched by rules with ` +
+        `conflicting orphanStrategy; the most destructive ('remove-children') wins.`
+      );
+    }
+    return strategy;
+  };
+
   if (matchedIndices.size > 0) {
-    result.removalMatches.push(...removalSet.matches);
+    // One removal match per matched node (dedup across multiple matching rules),
+    // attributed to the first rule that matched it.
+    const seen = new Set<number>();
+    for (const m of removalSet.matches) {
+      if (!seen.has(m.index)) {
+        seen.add(m.index);
+        result.removalMatches.push(m);
+      }
+    }
   }
 
   if (dryRun) {
@@ -121,13 +160,13 @@ function sanitizeStepTree(
     for (const i of matchedIndices) {
       const s = steps[i]!;
       counters.stepsRemoved +=
-        orphanStrategy === 'keep-shell'
+        strategyFor(i) === 'keep-shell'
           ? countStepNodes(s.steps)
           : 1 + countStepNodes(s.steps);
     }
     steps.forEach((s, i) => {
       if (!matchedIndices.has(i) && s.steps) {
-        sanitizeStepTree(s.steps, rules, orphanStrategy, timestampStrategy, counters, result, dryRun);
+        sanitizeStepTree(s.steps, rules, globalOrphanStrategy, timestampStrategy, counters, result, dryRun);
       }
     });
     return steps;
@@ -138,7 +177,7 @@ function sanitizeStepTree(
     const step = steps[i]!;
 
     if (matchedIndices.has(i)) {
-      if (orphanStrategy === 'keep-shell') {
+      if (strategyFor(i) === 'keep-shell') {
         // Keep the matched node as a hollow shell: empty its children and
         // reset count-related fields, but preserve its own duration.
         counters.stepsRemoved += countStepNodes(step.steps);
@@ -201,7 +240,7 @@ function sanitizeStepTree(
     // Not matched — recurse into children.
     if (Array.isArray(step.steps) && step.steps.length > 0) {
       step.steps = sanitizeStepTree(
-        step.steps, rules, orphanStrategy, timestampStrategy, counters, result, dryRun
+        step.steps, rules, globalOrphanStrategy, timestampStrategy, counters, result, dryRun
       );
     }
     output.push(step);
@@ -217,7 +256,7 @@ function sanitizeStepTree(
 function sanitizeShard(
   shard: unknown,
   rules: RemoveRule[],
-  orphanStrategy: 'remove-children' | 'keep-shell',
+  globalOrphanStrategy: OrphanStrategy | undefined,
   timestampStrategy: TimestampStrategy,
   counters: RemovalCounters,
   result: ProcessResult,
@@ -239,7 +278,7 @@ function sanitizeShard(
       if (Array.isArray(resObj['steps'])) {
         resObj['steps'] = sanitizeStepTree(
           resObj['steps'] as ReportStepNode[],
-          rules, orphanStrategy, timestampStrategy, counters, result, dryRun
+          rules, globalOrphanStrategy, timestampStrategy, counters, result, dryRun
         );
       }
     }
@@ -388,14 +427,16 @@ async function processBase64Report(
 
   // ── Remove phase ──
   if (config.remove && rules.length > 0) {
-    const orphanStrategy = config.remove.orphanStrategy ?? 'remove-children';
+    // Global default only — the effective strategy is resolved per matched node
+    // inside sanitizeStepTree (`rule.orphanStrategy ?? this ?? 'remove-children'`).
+    const globalOrphanStrategy = config.remove.orphanStrategy;
     const timestampStrategy = config.remove.timestampStrategy ?? 'absorb-into-prev';
     const counters: RemovalCounters = { stepsRemoved: 0, timestampRepairs: 0, mutations: 0 };
 
     for (const entry of entries) {
       if (entry.name === 'report.json') continue; // no step trees in the aggregate
       const changed = sanitizeShard(
-        entry.data, rules, orphanStrategy, timestampStrategy, counters, result, dryRun
+        entry.data, rules, globalOrphanStrategy, timestampStrategy, counters, result, dryRun
       );
       if (changed && !dryRun) {
         entry.modified = true;
@@ -517,20 +558,61 @@ function processLegacyReportData(
           result.removalMatches = removalSet.matches;
           result.stepsRemoved = removalSet.indices.size;
         } else {
-          const orphanStrategy = config.remove.orphanStrategy ?? 'remove-children';
-          const cleaned = removeSteps(events, removalSet, orphanStrategy);
+          // Resolve orphanStrategy per matched step (per-rule, most-destructive
+          // wins) for this flat legacy event list.
+          const globalDefault = config.remove.orphanStrategy;
+          const rulesByIndex = new Map<number, RemoveRule[]>();
+          for (const m of removalSet.matches) {
+            if (m.rule) {
+              const list = rulesByIndex.get(m.index) ?? [];
+              list.push(m.rule);
+              rulesByIndex.set(m.index, list);
+            }
+          }
+          const strategyByIndex = (idx: number) =>
+            resolveOrphanStrategy(rulesByIndex.get(idx) ?? [], globalDefault).strategy;
+          for (const idx of removalSet.indices) {
+            if (resolveOrphanStrategy(rulesByIndex.get(idx) ?? [], globalDefault).conflict) {
+              logger.verbose(
+                `Step "${events[idx]?.title ?? 'unknown'}" is matched by rules with ` +
+                `conflicting orphanStrategy; the most destructive ('remove-children') wins.`
+              );
+            }
+          }
+
+          const cleaned = removeSteps(events, removalSet, strategyByIndex);
           const strategy = config.remove.timestampStrategy ?? 'absorb-into-prev';
 
           const cleanedSet = new Set(cleaned);
           const actuallyRemovedEvents = events.filter((e) => !cleanedSet.has(e));
 
-          // keep-shell: kept parents still span the hidden children's time —
-          // no timeline hole exists, so nothing may be absorbed into neighbours.
-          const repaired = repairTimestamps(
-            cleaned,
-            orphanStrategy === 'keep-shell' ? [] : actuallyRemovedEvents,
-            strategy
-          );
+          // A removed event leaves an absorbable hole UNLESS covered by a
+          // surviving keep-shell ancestor (which still spans its time). Seed
+          // with keep-shell root callIds and propagate down parentId chains.
+          const coveredCallIds = new Set<string>();
+          for (const idx of removalSet.indices) {
+            if (strategyByIndex(idx) === 'keep-shell') {
+              const cid = events[idx]?.callId;
+              if (typeof cid === 'string') coveredCallIds.add(cid);
+            }
+          }
+          const coveredEvents = new Set<TraceEvent>();
+          let coveredChanged = true;
+          while (coveredChanged) {
+            coveredChanged = false;
+            for (const e of actuallyRemovedEvents) {
+              if (coveredEvents.has(e)) continue;
+              const pid = typeof e.parentId === 'string' ? e.parentId : undefined;
+              if (pid && coveredCallIds.has(pid)) {
+                coveredEvents.add(e);
+                if (typeof e.callId === 'string') coveredCallIds.add(e.callId);
+                coveredChanged = true;
+              }
+            }
+          }
+          const holeEvents = actuallyRemovedEvents.filter((e) => !coveredEvents.has(e));
+
+          const repaired = repairTimestamps(cleaned, holeEvents, strategy);
 
           const repairedByCallId = new Map<string, TraceEvent>();
           for (const e of repaired) {

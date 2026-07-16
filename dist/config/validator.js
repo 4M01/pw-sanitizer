@@ -25,12 +25,35 @@ function validateConfig(config) {
             validatePattern(pattern);
         }
     }
+    if (config.remove) {
+        validateOrphanStrategy(config.remove.orphanStrategy, 'remove.orphanStrategy');
+    }
     if (config.remove?.rules) {
         for (const rule of config.remove.rules) {
             validateRule(rule);
         }
     }
     validateOutput(config);
+}
+/** The only values {@link OrphanStrategy} accepts. */
+const VALID_ORPHAN_STRATEGIES = ['remove-children', 'keep-shell'];
+/**
+ * Validates an `orphanStrategy` value (global or per-rule). `undefined` is
+ * always allowed — it means "fall back to the next level of the resolution
+ * chain". Any other value that is not one of the two accepted strings is fatal.
+ *
+ * @param value   - The value to validate (may be `undefined`).
+ * @param context - Where the value came from, used in the error message
+ *   (e.g. `'remove.orphanStrategy'` or `'rule "timeout noise" orphanStrategy'`).
+ * @throws Calls `logger.fatal` (which throws) for an invalid value.
+ */
+function validateOrphanStrategy(value, context) {
+    if (value === undefined)
+        return;
+    if (typeof value !== 'string' ||
+        !VALID_ORPHAN_STRATEGIES.includes(value)) {
+        logger_js_1.logger.fatal(`${context} must be one of ${VALID_ORPHAN_STRATEGIES.map((s) => `'${s}'`).join(' or ')}, got ${JSON.stringify(value)}.`);
+    }
 }
 /**
  * Validates the `output` section. Currently checks that `traceDir` — which
@@ -113,5 +136,6 @@ function validateRule(rule) {
     if (!rule.stepName && !rule.selector && !rule.url && !rule.actionType) {
         logger_js_1.logger.fatal(`Rule "${rule.label}" must define at least one matcher: stepName, selector, url, or actionType`);
     }
+    validateOrphanStrategy(rule.orphanStrategy, `rule "${rule.label}" orphanStrategy`);
 }
 //# sourceMappingURL=validator.js.map
