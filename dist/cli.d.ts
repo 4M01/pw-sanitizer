@@ -9,6 +9,7 @@ import type { SanitizerConfig } from './config/types.js';
  *
  * Flag → config field mapping:
  * - `--report`         → `output.reportDir`
+ * - `--traces <path>`  → `output.traceDir` (string or array when repeated)
  * - `--no-traces`      → `output.processTraces = false`
  * - `--no-reports`     → `output.processReports = false`
  * - `--output`         → `output.dir` + `output.mode = 'copy'`
@@ -18,6 +19,14 @@ import type { SanitizerConfig } from './config/types.js';
  * - `--dry-run`        → `remove.dryRun = true`
  * - `--log-level`      → `reporting.logLevel`
  * - `--summary-output` → `reporting.summaryFile`
+ *
+ * Precedence is strictly CLI > config file > built-in default: a flag only
+ * touches the config when it was actually provided (no Commander defaults),
+ * so config-file values survive when the corresponding flag is absent.
+ *
+ * Note on `--traces` / `--no-traces`: Commander merges both into `opts.traces` —
+ * `false` (skip processing), a string/array (directory override), or
+ * `true`/`undefined` (absent).
  *
  * @param config - The config object to mutate (loaded from file or empty).
  * @param opts   - Raw parsed options from Commander.js (`program.opts()`).

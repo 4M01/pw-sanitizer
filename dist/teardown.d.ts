@@ -1,6 +1,14 @@
 /**
  * Playwright `globalTeardown` integration for `playwright-sanitizer`.
  *
+ * ⚠️ **Only suitable for trace-only sanitization.** Playwright runs
+ * `globalTeardown` BEFORE reporters write their output (`reporter.onEnd()`),
+ * so when this hook fires the current run's HTML report and its
+ * `playwright-report/data/*.zip` trace copies do not exist yet — at best it
+ * would sanitize the PREVIOUS run's report. Use the `pw-sanitizer/reporter`
+ * integration instead (it runs in `onExit()`, after all reporters have
+ * finished writing).
+ *
  * Register this as the `globalTeardown` hook in your Playwright config and the
  * sanitizer will run automatically after every test suite completes. Config is
  * auto-discovered from `playwright-sanitizer.config.ts` (or the `sanitizer`

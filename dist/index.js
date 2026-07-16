@@ -34,6 +34,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.loadRuleFile = exports.loadPatternFile = void 0;
+exports.collectTraceFiles = collectTraceFiles;
 exports.sanitize = sanitize;
 exports.redactReport = redactReport;
 exports.redactTrace = redactTrace;
@@ -52,6 +53,40 @@ var pattern_loader_js_1 = require("./redact/pattern-loader.js");
 Object.defineProperty(exports, "loadPatternFile", { enumerable: true, get: function () { return pattern_loader_js_1.loadPatternFile; } });
 var rule_loader_js_1 = require("./remove/rule-loader.js");
 Object.defineProperty(exports, "loadRuleFile", { enumerable: true, get: function () { return rule_loader_js_1.loadRuleFile; } });
+/**
+ * Discovers trace `.zip` files across one or more trace directories.
+ *
+ * `output.traceDir` accepts `string | string[]` — an array lets a single run
+ * cover both `./test-results` and the HTML report's `data/` folder (the trace
+ * copies the report's built-in viewer actually opens). Files matched by more
+ * than one directory are deduplicated by resolved absolute path; the first
+ * directory that matched a file is kept as its root for output-path mirroring.
+ *
+ * Exported primarily for testing.
+ *
+ * @param traceDir - The configured trace directory or directories.
+ *   Defaults to `'./test-results'` when omitted.
+ * @returns One entry per unique trace file: the absolute file path plus the
+ *   trace directory it was discovered under.
+ */
+async function collectTraceFiles(traceDir) {
+    const dirs = Array.isArray(traceDir)
+        ? traceDir
+        : [traceDir ?? './test-results'];
+    const collected = [];
+    const seen = new Set();
+    for (const dir of dirs) {
+        const files = await (0, utils_js_1.findFiles)(dir, '**/*.zip');
+        for (const file of files) {
+            const resolved = path.resolve(file);
+            if (seen.has(resolved))
+                continue;
+            seen.add(resolved);
+            collected.push({ file, dir });
+        }
+    }
+    return collected;
+}
 /**
  * Main programmatic entry point for `playwright-sanitizer`.
  *
@@ -102,10 +137,9 @@ async function sanitize(configOverride) {
     }
     // Process trace files
     if (config.output?.processTraces !== false) {
-        const traceDir = config.output?.traceDir ?? './test-results';
-        const traceFiles = await (0, utils_js_1.findFiles)(traceDir, '**/*.zip');
-        for (const file of traceFiles) {
-            const outputPath = (0, utils_js_1.computeOutputPath)(file, traceDir, config);
+        const traceFiles = await collectTraceFiles(config.output?.traceDir);
+        for (const { file, dir } of traceFiles) {
+            const outputPath = (0, utils_js_1.computeOutputPath)(file, dir, config);
             const result = await (0, trace_file_js_1.processTraceFile)(file, outputPath, config, patterns, rules);
             results.push(result);
         }
