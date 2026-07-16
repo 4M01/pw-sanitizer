@@ -58,31 +58,31 @@ function collectChildIndices(events, parentIndex, allEvents) {
  *
  * The input array is **never mutated** — a new array is always returned.
  *
+ * ### Per-step (mixed) strategies
+ * `orphanStrategy` may be a **function** `(index) => OrphanStrategy` returning
+ * the strategy for each matched index. This lets one pass mix `'keep-shell'`
+ * and `'remove-children'` across different matched steps (per-rule strategies).
+ * A plain string applies the same strategy to every matched step.
+ *
  * @param events          - The ordered list of trace events.
  * @param removalSet      - The set of matched step indices (from {@link findStepsToRemove}).
  * @param orphanStrategy  - How to handle descendants of removed steps.
- *   `'remove-children'` *(default)* or `'keep-shell'`.
+ *   `'remove-children'` *(default)* or `'keep-shell'`, or a per-index resolver
+ *   function for mixed strategies.
  * @returns A new array with the appropriate steps removed.
  */
 function removeSteps(events, removalSet, orphanStrategy = 'remove-children') {
+    const strategyFor = (idx) => typeof orphanStrategy === 'function' ? orphanStrategy(idx) : orphanStrategy;
     const indicesToRemove = new Set();
-    if (orphanStrategy === 'keep-shell') {
-        // Keep matched events themselves; remove only their descendants.
-        for (const idx of removalSet.indices) {
-            const children = collectChildIndices(events, idx, events);
-            for (const childIdx of children) {
-                indicesToRemove.add(childIdx);
-            }
-        }
-    }
-    else {
-        // remove-children (default): remove matched events AND all descendants.
-        for (const idx of removalSet.indices) {
+    for (const idx of removalSet.indices) {
+        // remove-children removes the matched step itself; keep-shell keeps it.
+        if (strategyFor(idx) !== 'keep-shell') {
             indicesToRemove.add(idx);
-            const children = collectChildIndices(events, idx, events);
-            for (const childIdx of children) {
-                indicesToRemove.add(childIdx);
-            }
+        }
+        // Both strategies remove all descendants.
+        const children = collectChildIndices(events, idx, events);
+        for (const childIdx of children) {
+            indicesToRemove.add(childIdx);
         }
     }
     // Sort indices in reverse order for safe removal

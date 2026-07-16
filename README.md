@@ -161,6 +161,12 @@ const config: SanitizerConfig = {
         // Safety guard: only remove if this step appears at least N times
         // consecutively within a test. Logs a warning and skips removal if not met.
         minConsecutiveOccurrences: 3,
+
+        // Per-rule override for handling this step's child steps when it matches.
+        // 'keep-shell': keep the matched step, strip only its descendants.
+        // 'remove-children': remove the matched step and all descendants.
+        // Resolution: rule.orphanStrategy ?? remove.orphanStrategy ?? 'remove-children'.
+        orphanStrategy: 'remove-children',
       },
     ],
 
@@ -173,7 +179,9 @@ const config: SanitizerConfig = {
     // 'gap': no adjustment; a gap appears in the timeline
     timestampStrategy: 'absorb-into-prev',
 
-    // What to do with child steps when a parent is removed.
+    // Default handling of child steps when a parent is removed. This is now just
+    // the DEFAULT for rules that don't set their own orphanStrategy (see the
+    // per-rule field above) — a per-rule value always overrides it.
     // 'remove-children' (default): children are also removed
     // 'keep-shell': parent is kept as an empty container
     orphanStrategy: 'remove-children',
@@ -449,6 +457,28 @@ Step removal operates on the trace event tree inside each `.zip` file:
 
 The `minConsecutiveOccurrences` safety guard prevents accidentally removing a step that only appears occasionally — if the actual consecutive count is below the threshold, the step is **not** removed and a warning is logged instead.
 
+### Per-rule orphanStrategy (mixed strategies)
+
+By default, the global `remove.orphanStrategy` controls how all matched steps are treated. However, you can override this behavior per rule by declaring `orphanStrategy` inside the rule definition. This allows you to mix different strategies in one sanitize pass (e.g. keeping some parent steps as shells while completely removing others):
+
+```ts
+remove: {
+  rules: [
+    { label: 'spinner internals', stepName: /waitForSpinnerToDisappear/i, orphanStrategy: 'keep-shell' },
+    { label: 'timeout noise',  stepName: 'Wait for timeout',  orphanStrategy: 'remove-children' },
+    { label: 'selector noise', stepName: 'Wait for selector', orphanStrategy: 'remove-children' },
+  ],
+  timestampStrategy: 'absorb-into-prev',
+}
+```
+
+Resolution order for each matched step is:
+1. `rule.orphanStrategy`
+2. `remove.orphanStrategy` (global config)
+3. `'remove-children'` (default fallback)
+
+If a single step is matched by multiple rules that have conflicting strategies, the **most destructive** strategy (`'remove-children'`) wins, and a verbose warning is logged.
+
 ### A trace `.zip` is TWO linked event streams, not one
 
 This is the single most important thing to understand when post-processing Playwright traces. Every modern `trace.zip` (Playwright ≥ 1.40) contains **two correlated NDJSON streams that must be treated as one dataset**:
@@ -470,35 +500,4 @@ Because of this, **removing a step from `test.trace` alone is not enough**. Left
 `pw-sanitizer` removes across **both** streams as one linked graph:
 
 1. **Phase 1 — runner stream.** Match rules against `test.trace`, then collect the full transitive set of removed `callId`s (matched steps under `remove-children`; every descendant under `keep-shell`).
-2. **Phase 2 — every other `*.trace` stream.** Drop every event that references a removed `callId` via `stepId`, `parentId`, or `snapshot.callId`, plus all events sharing that event's own `callId` (its paired `after`, and any `log`/`event`/snapshot siblings). The pass iterates to a fixpoint and applies your `timestampStrategy` per stream.
-3. **Back-propagation.** If a rule matches a browser-side action *directly* (a `selector`/`actionType` rule against `0-trace.trace`), the removal is propagated back to the runner step it belongs to (via `stepId`) so the two streams never disagree.
-4. **Sanity pass.** After both phases the sanitizer asserts that no surviving event in any stream still references a removed `callId`; a warning is logged if any slip through.
-
-The result opens cleanly in `npx playwright show-trace` with no orphan rows, and the summary's per-rule counts always sum to the reported total (in both dry and real runs).
-
-> **If you build your own trace post-processing tooling, treat the `.trace` files in a `trace.zip` as one linked dataset — never edit `test.trace` in isolation.**
-
----
-
-## CI integration example
-
-```yaml
-# .github/workflows/test.yml
-- name: Run Playwright tests
-  run: npx playwright test
-
-- name: Sanitize Playwright artifacts
-  run: npx pw-sanitizer --summary-output sanitization-summary.json
-
-- name: Upload sanitized report
-  uses: actions/upload-artifact@v4
-  with:
-    name: playwright-report
-    path: sanitized-report/
-```
-
----
-
-## License
-
-MIT
+2. **Phase 2 — every other `*.trace` stream.** Drop every event that references a removed `callId` via `stepId`, `parentId`, or `snapshot.callId`, plus all events sharing that event's own `callId` (its paired `after`, and any `log`/`event`/snapshot siblings).

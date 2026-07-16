@@ -182,9 +182,25 @@ export interface RemoveConfig {
    *
    * - `'remove-children'` *(default)*: also remove all descendant steps.
    * - `'keep-shell'`: keep the parent as a no-op container without its children.
+   *
+   * This is the **default** applied to any matched step whose own rule does not
+   * declare {@link RemoveRule.orphanStrategy}. A per-rule value always wins over
+   * this global default. When neither is set, `'remove-children'` applies.
    */
-  orphanStrategy?: 'remove-children' | 'keep-shell';
+  orphanStrategy?: OrphanStrategy;
 }
+
+/**
+ * How descendant steps of a matched step are handled during removal.
+ *
+ * - `'remove-children'` *(default)*: remove the matched step and all descendants.
+ * - `'keep-shell'`: keep the matched step as a hollow container and remove only
+ *   its descendants.
+ *
+ * @see {@link RemoveConfig.orphanStrategy}
+ * @see {@link RemoveRule.orphanStrategy}
+ */
+export type OrphanStrategy = 'remove-children' | 'keep-shell';
 
 /**
  * Controls how the timestamp timeline is repaired after step removal.
@@ -263,6 +279,27 @@ export interface RemoveRule {
    * occurrences of a step that also appears in noisy repeating sequences.
    */
   minConsecutiveOccurrences?: number;
+
+  /**
+   * Per-rule override for how this step's descendants are handled when the
+   * step matches.
+   *
+   * - `'remove-children'`: remove the matched step and all its descendants.
+   * - `'keep-shell'`: keep the matched step as a hollow container and remove
+   *   only its descendants.
+   *
+   * Resolution order for a matched step is:
+   * `rule.orphanStrategy ?? remove.orphanStrategy ?? 'remove-children'`.
+   *
+   * This lets one config mix strategies — e.g. a parent polling step kept as a
+   * visible shell while explicit leaf waits are removed entirely — without the
+   * consumer writing a two-pass wrapper. If a single step is matched by
+   * multiple rules with conflicting strategies, the **most destructive**
+   * (`'remove-children'`) wins and the conflict is noted at verbose log level.
+   *
+   * JSON rule files support this field too — it is a plain string.
+   */
+  orphanStrategy?: OrphanStrategy;
 }
 
 // ─────────────────────────────────────────────
@@ -431,6 +468,16 @@ export interface StepMatch {
   ruleLabel: string;
   /** The matched {@link TraceEvent} object. */
   event: TraceEvent;
+  /**
+   * The {@link RemoveRule} that produced this match.
+   *
+   * Present for matches emitted by {@link findStepsToRemove}; carried so
+   * processors can resolve the effective {@link OrphanStrategy} per matched
+   * step (a step may be matched by multiple rules). Optional for backward
+   * compatibility with matches synthesised elsewhere (e.g. tests, descendant
+   * attribution).
+   */
+  rule?: RemoveRule;
 }
 
 /**
