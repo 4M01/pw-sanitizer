@@ -2,25 +2,20 @@ import type { SanitizerConfig, RedactPattern, RemoveRule, ProcessResult } from '
 /**
  * Sanitizes a single Playwright HTML report file.
  *
- * Processing pipeline:
- * 1. Read the HTML file from disk.
- * 2. Extract the embedded `window.__pw_report_data__` JSON blob via regex.
- * 3. **Redact phase** (if `config.redact` is set and patterns are loaded):
- *    walk the JSON tree with {@link walkAndRedact} and replace matched values.
- * 4. **Remove phase** (if `config.remove` is set and rules are loaded):
- *    extract step events, run {@link findStepsToRemove}, then
- *    {@link removeSteps} and {@link repairTimestamps}.
- * 5. Re-serialise the JSON and splice it back into the original HTML.
- * 6. Write the output according to `config.output.mode`.
+ * Supports the **real Playwright HTML report format** (>= 1.40): the report
+ * data is embedded as a base64-encoded zip (see {@link WINDOW_BASE64_REGEX}
+ * and {@link TEMPLATE_BASE64_REGEX}). The zip is decoded, its `report.json`
+ * and per-test-file JSON shards are redacted and step-pruned, then it is
+ * re-zipped, re-encoded, and substituted back into the HTML.
  *
- * On any unrecoverable parse error, the function logs a warning and returns
- * an empty {@link ProcessResult} rather than throwing.
+ * **Legacy fallback:** reports embedding plain JSON via
+ * `window.__pw_report_data__` are still processed through the original path.
  *
  * @param inputPath  - Absolute path to the source HTML report file.
  * @param outputPath - Destination path for the sanitized output.
  * @param config     - The full sanitizer configuration.
- * @param patterns   - Pre-built list of redact patterns (from {@link buildPatternRegistry}).
- * @param rules      - Pre-built list of removal rules (from {@link buildRuleRegistry}).
+ * @param patterns   - Pre-built list of redact patterns.
+ * @param rules      - Pre-built list of removal rules.
  * @returns A {@link ProcessResult} with counts and match details for this file.
  */
 export declare function processHtmlReport(inputPath: string, outputPath: string, config: SanitizerConfig, patterns: RedactPattern[], rules: RemoveRule[]): Promise<ProcessResult>;

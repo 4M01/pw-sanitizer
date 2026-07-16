@@ -30,6 +30,28 @@ function validateConfig(config) {
             validateRule(rule);
         }
     }
+    validateOutput(config);
+}
+/**
+ * Validates the `output` section. Currently checks that `traceDir` — which
+ * accepts `string | string[]` — only contains non-empty strings.
+ *
+ * @param config - The config to inspect.
+ * @throws Calls `logger.fatal` (which throws) for an invalid `traceDir`.
+ */
+function validateOutput(config) {
+    const traceDir = config.output?.traceDir;
+    if (traceDir === undefined)
+        return;
+    const dirs = Array.isArray(traceDir) ? traceDir : [traceDir];
+    if (Array.isArray(traceDir) && dirs.length === 0) {
+        logger_js_1.logger.fatal('output.traceDir must not be an empty array.');
+    }
+    for (const dir of dirs) {
+        if (typeof dir !== 'string' || dir.length === 0) {
+            logger_js_1.logger.fatal('output.traceDir must be a non-empty string or an array of non-empty strings.');
+        }
+    }
 }
 /**
  * Returns `true` if the config's `redact` section contains at least one

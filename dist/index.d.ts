@@ -3,6 +3,26 @@ export type { SanitizerConfig, RedactConfig, RemoveConfig, OutputConfig, Reporti
 export { loadPatternFile } from './redact/pattern-loader.js';
 export { loadRuleFile } from './remove/rule-loader.js';
 /**
+ * Discovers trace `.zip` files across one or more trace directories.
+ *
+ * `output.traceDir` accepts `string | string[]` — an array lets a single run
+ * cover both `./test-results` and the HTML report's `data/` folder (the trace
+ * copies the report's built-in viewer actually opens). Files matched by more
+ * than one directory are deduplicated by resolved absolute path; the first
+ * directory that matched a file is kept as its root for output-path mirroring.
+ *
+ * Exported primarily for testing.
+ *
+ * @param traceDir - The configured trace directory or directories.
+ *   Defaults to `'./test-results'` when omitted.
+ * @returns One entry per unique trace file: the absolute file path plus the
+ *   trace directory it was discovered under.
+ */
+export declare function collectTraceFiles(traceDir?: string | string[]): Promise<Array<{
+    file: string;
+    dir: string;
+}>>;
+/**
  * Main programmatic entry point for `playwright-sanitizer`.
  *
  * Discovers (or uses the provided) configuration, then processes all matching

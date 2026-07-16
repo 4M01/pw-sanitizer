@@ -15,7 +15,7 @@ It also lets you delete repetitive or internal steps (e.g. health-check pings, i
 ## Features
 
 - Redact secrets in HTML reports and trace `.zip` files by key name, value pattern, or both
-- Remove entire steps from traces with configurable timestamp repair
+- Remove entire steps from traces with configurable timestamp repair — across **both** trace streams (`test.trace` + `0-trace.trace`, …) so no orphan rows are left in the viewer ([details](#a-trace-zip-is-two-linked-event-streams-not-one))
 - Three output modes: `copy` (safe default), `in-place`, `side-by-side`
 - Zero built-in patterns — you declare exactly what gets touched, nothing else runs
 - Dry-run mode to preview changes without writing files
@@ -448,6 +448,35 @@ Step removal operates on the trace event tree inside each `.zip` file:
 4. Child steps of removed parents are handled according to `orphanStrategy`.
 
 The `minConsecutiveOccurrences` safety guard prevents accidentally removing a step that only appears occasionally — if the actual consecutive count is below the threshold, the step is **not** removed and a warning is logged instead.
+
+### A trace `.zip` is TWO linked event streams, not one
+
+This is the single most important thing to understand when post-processing Playwright traces. Every modern `trace.zip` (Playwright ≥ 1.40) contains **two correlated NDJSON streams that must be treated as one dataset**:
+
+| Stream | Contents | Hierarchy | ID namespace |
+| --- | --- | --- | --- |
+| `test.trace` | Test-runner steps (`test.step`, `pw:api`, `expect`, `hook`, `fixture`) | `parentId` → `callId` | `test.step@N`, `pw:api@N`, … |
+| `0-trace.trace`, `1-trace.trace`, … | Browser-context actions (`Frame`/`Page`/`APIRequestContext` — `goto`, `waitForSelector`, `isVisible`, `waitForEventInfo`, `fetch`, …) | **own** `call@N` namespace, no `parentId` into `test.trace` | `call@N` |
+
+The two streams are stitched together by fields, **not** by a shared tree:
+
+- A browser action's `before`/`after` pair links to its runner step via **`stepId`** (e.g. `{"callId":"call@13","method":"waitForTimeout","stepId":"pw:api@83"}`).
+- `frame-snapshot` lines carry **no** top-level `callId` — theirs is nested at `snapshot.callId`.
+- `log` / `event` lines may reference a runner step through `stepId` alone, with a `callId` that never had a matching `before`.
+- Correlated network entries live in `*-trace.network`, and `resource-snapshot` lines have **no** `callId` at all (matched by request URL instead).
+
+Because of this, **removing a step from `test.trace` alone is not enough**. Left uncorrected, the browser-side events keep a dangling `stepId` and the trace viewer renders them as loose "orphan" rows (`Wait for load state`, `Wait for selector`, …) at the root level and beside the kept shell step — so removal *looks* broken even though `test.trace` is clean.
+
+`pw-sanitizer` removes across **both** streams as one linked graph:
+
+1. **Phase 1 — runner stream.** Match rules against `test.trace`, then collect the full transitive set of removed `callId`s (matched steps under `remove-children`; every descendant under `keep-shell`).
+2. **Phase 2 — every other `*.trace` stream.** Drop every event that references a removed `callId` via `stepId`, `parentId`, or `snapshot.callId`, plus all events sharing that event's own `callId` (its paired `after`, and any `log`/`event`/snapshot siblings). The pass iterates to a fixpoint and applies your `timestampStrategy` per stream.
+3. **Back-propagation.** If a rule matches a browser-side action *directly* (a `selector`/`actionType` rule against `0-trace.trace`), the removal is propagated back to the runner step it belongs to (via `stepId`) so the two streams never disagree.
+4. **Sanity pass.** After both phases the sanitizer asserts that no surviving event in any stream still references a removed `callId`; a warning is logged if any slip through.
+
+The result opens cleanly in `npx playwright show-trace` with no orphan rows, and the summary's per-rule counts always sum to the reported total (in both dry and real runs).
+
+> **If you build your own trace post-processing tooling, treat the `.trace` files in a `trace.zip` as one linked dataset — never edit `test.trace` in isolation.**
 
 ---
 

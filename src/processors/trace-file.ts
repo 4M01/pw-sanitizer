@@ -195,8 +195,8 @@ function collectSteps(file: NdjsonFile): NdjsonStep[] {
  */
 function collectDescendantSteps(
   allSteps: NdjsonStep[],
-  roots: Set<NdjsonStep>
-): Set<NdjsonStep> {
+  rootLabels: Map<NdjsonStep, string>
+): Map<NdjsonStep, string> {
   // parent (file-scoped callId) → children within the same file
   const childrenByParent = new Map<string, NdjsonStep[]>();
   // parent callId (any file) → cross-file linked children
@@ -216,10 +216,12 @@ function collectDescendantSteps(
     }
   }
 
-  const descendants = new Set<NdjsonStep>();
-  const queue = [...roots];
+  const descendants = new Map<NdjsonStep, string>();
+  const queue: Array<{ step: NdjsonStep; label: string }> = [...rootLabels].map(
+    ([step, label]) => ({ step, label })
+  );
   while (queue.length > 0) {
-    const current = queue.pop()!;
+    const { step: current, label } = queue.pop()!;
     const children = [
       ...(childrenByParent.get(fileScopedId(current.file, current.callId)) ?? []),
       ...(linkedByStepId.get(current.callId) ?? []).filter(
@@ -227,9 +229,13 @@ function collectDescendantSteps(
       ),
     ];
     for (const child of children) {
-      if (!descendants.has(child) && !roots.has(child)) {
-        descendants.add(child);
-        queue.push(child);
+      // A step is a descendant only if it is neither a root nor already seen.
+      // Descendants inherit the rule label of the root that reached them, so
+      // the summary can attribute every removed event to a declared rule and
+      // the per-rule counts sum to the grand total.
+      if (!descendants.has(child) && !rootLabels.has(child)) {
+        descendants.set(child, label);
+        queue.push({ step: child, label });
       }
     }
   }
@@ -284,8 +290,10 @@ function applyRemovalToTraceFiles(
   // ── Per-file step collection and rule matching ──
   const stepsByFile = new Map<NdjsonFile, NdjsonStep[]>();
   const allSteps: NdjsonStep[] = [];
-  const matched = new Set<NdjsonStep>();
-  let totalMatched = 0;
+  // Matched roots → the label of the rule that matched them. Attribution is
+  // carried through descendant expansion so the summary's per-rule counts sum
+  // to the grand total (see reporter.ts).
+  const rootLabels = new Map<NdjsonStep, string>();
 
   for (const file of traceFiles) {
     const steps = collectSteps(file);
@@ -297,46 +305,74 @@ function applyRemovalToTraceFiles(
     result.safetyGuardWarnings.push(...removalSet.safetyGuardWarnings);
     if (removalSet.indices.size === 0) continue;
 
-    totalMatched += removalSet.indices.size;
-    result.removalMatches.push(...removalSet.matches);
-
-    if (config.remove?.dryRun) {
-      logger.info(
-        `[DRY RUN] Would remove ${removalSet.indices.size} steps from ${inputPath} (${file.name})`
-      );
-      for (const m of removalSet.matches) {
-        logger.info(
-          `  - Rule "${m.ruleLabel}": step at index ${m.index} ` +
-          `("${m.event.title ?? m.event.action ?? 'unknown'}")`
-        );
-      }
-      continue;
+    // First rule label wins for a given step (labels are only for reporting).
+    const labelByIndex = new Map<number, string>();
+    for (const m of removalSet.matches) {
+      if (!labelByIndex.has(m.index)) labelByIndex.set(m.index, m.ruleLabel);
     }
-
     for (const idx of removalSet.indices) {
-      matched.add(steps[idx]!);
+      rootLabels.set(steps[idx]!, labelByIndex.get(idx) ?? rules[0]?.label ?? 'remove');
     }
   }
 
-  if (totalMatched === 0) return none;
+  if (rootLabels.size === 0) return none;
 
-  if (config.remove?.dryRun) {
-    result.stepsRemoved += totalMatched;
-    return none;
+  // ── Back-propagate browser-file matches to their test.trace step ──
+  // A rule that matches a library-side action directly (selector / actionType
+  // rules against `0-trace.trace`, ...) would otherwise leave the paired
+  // test-runner step behind in `test.trace`, so the two streams disagree. Remap
+  // such a match onto the runner step it belongs to (via `linkedStepId`); the
+  // browser leaf then falls out naturally as that step's descendant. This keeps
+  // keep-shell coherent (the runner step becomes the shell) and makes a
+  // browser-only match actually remove something instead of reporting a phantom.
+  const testStepByCallId = new Map<string, NdjsonStep>();
+  for (const step of allSteps) {
+    if (step.file.name.endsWith('test.trace') && step.linkedStepId === undefined) {
+      testStepByCallId.set(step.callId, step);
+    }
+  }
+  for (const [leaf, label] of [...rootLabels]) {
+    if (leaf.linkedStepId) {
+      const owner = testStepByCallId.get(leaf.linkedStepId);
+      if (owner) {
+        if (!rootLabels.has(owner)) rootLabels.set(owner, label);
+        rootLabels.delete(leaf);
+      }
+    }
   }
 
   // ── Expand to descendants across the whole archive ──
   const orphanStrategy = config.remove?.orphanStrategy ?? 'remove-children';
-  const descendants = collectDescendantSteps(allSteps, matched);
+  const descendantLabels = collectDescendantSteps(allSteps, rootLabels);
 
   // keep-shell: keep the matched steps' own before/after events, drop descendants.
   // remove-children: drop matched steps AND descendants.
-  const removedSteps = new Set<NdjsonStep>(descendants);
+  const removedLabels = new Map<NdjsonStep, string>(descendantLabels);
   if (orphanStrategy !== 'keep-shell') {
-    for (const s of matched) removedSteps.add(s);
+    for (const [s, l] of rootLabels) if (!removedLabels.has(s)) removedLabels.set(s, l);
   }
 
-  if (removedSteps.size === 0) return none;
+  // keep-shell on leaf matches (no descendants) legitimately removes nothing.
+  // Report zero rather than a phantom count so per-rule totals stay honest.
+  if (removedLabels.size === 0) return none;
+
+  // ── Dry run: report the true removal count (incl. descendants) and stop ──
+  if (config.remove?.dryRun) {
+    logger.info(
+      `[DRY RUN] Would remove ${removedLabels.size} steps from ${inputPath}`
+    );
+    for (const [s, label] of removedLabels) {
+      logger.verbose(
+        `  - Rule "${label}": step ${s.callId} in ${s.file.name} ` +
+        `("${s.synthetic.title ?? s.synthetic.action ?? 'unknown'}")`
+      );
+      result.removalMatches.push({ index: s.beforeIndex, ruleLabel: label, event: s.synthetic });
+    }
+    result.stepsRemoved += removedLabels.size;
+    return none;
+  }
+
+  const removedSteps = new Set<NdjsonStep>(removedLabels.keys());
 
   // URLs of removed steps — used to drop matching *.network resource
   // snapshots, which have no callId to correlate on.
@@ -419,9 +455,132 @@ function applyRemovalToTraceFiles(
     }
   }
 
+  // Emit one removal match per ACTUALLY removed step, attributed to the rule
+  // that caused it. This keeps `removalMatches.length === stepsRemoved`, so the
+  // summary's per-rule counts always sum to the grand total (both dry and real
+  // runs) — the invariant the old code violated (per-rule matched roots vs. a
+  // total that also counted, or failed to count, descendants).
+  for (const [s, label] of removedLabels) {
+    result.removalMatches.push({ index: s.beforeIndex, ruleLabel: label, event: s.synthetic });
+  }
   result.stepsRemoved += removedSteps.size;
   result.timestampRepairs += timestampRepairs;
   return { modified: true, removedCallIdsByFile, removedUrls };
+}
+
+/**
+ * Phase 2 — cross-stream orphan sweep.
+ *
+ * The step graph in {@link applyRemovalToTraceFiles} removes browser-side
+ * `before`/`after` actions (they are captured as steps and linked via
+ * `stepId`). It does NOT catch two classes of correlated line that carry no
+ * top-level `callId` matching a removed step:
+ *
+ * - `frame-snapshot` entries, whose callId lives at `snapshot.callId`;
+ * - fire-and-forget `event` / `log` lines that reference a removed step purely
+ *   through `stepId` (their own `callId`, if any, never had a `before`).
+ *
+ * Left behind, these surface in the trace viewer as loose rows and dangling
+ * snapshot references. This pass seeds from every callId removed in phase 1 and
+ * iterates to a fixpoint: any surviving line that references a removed callId
+ * via `callId`, `stepId`, `parentId`, or `snapshot.callId` is dropped, and its
+ * own `callId` is added to the removed set so its paired `after` / `log` /
+ * snapshot siblings follow. Auxiliary lines are not steps, so they do not count
+ * toward `stepsRemoved`.
+ *
+ * @returns The number of additional lines dropped and the final removed-callId set.
+ */
+function sweepCrossStreamOrphans(
+  traceFiles: NdjsonFile[],
+  seed: Set<string>
+): { orphanLinesRemoved: number; removedCallIds: Set<string> } {
+  const removed = new Set<string>(seed);
+  let orphanLinesRemoved = 0;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const file of traceFiles) {
+      for (const line of file.lines) {
+        if (line.removed || !line.obj) continue;
+        const o = line.obj;
+        const cid = typeof o['callId'] === 'string' ? (o['callId'] as string) : undefined;
+        const sid =
+          typeof o['stepId'] === 'string' && o['stepId'] !== cid
+            ? (o['stepId'] as string)
+            : undefined;
+        const pid = typeof o['parentId'] === 'string' ? (o['parentId'] as string) : undefined;
+        let snapCid: string | undefined;
+        const snap = o['snapshot'];
+        if (snap && typeof snap === 'object' && typeof (snap as Record<string, unknown>)['callId'] === 'string') {
+          snapCid = (snap as Record<string, unknown>)['callId'] as string;
+        }
+
+        const hit =
+          (cid !== undefined && removed.has(cid)) ||
+          (sid !== undefined && removed.has(sid)) ||
+          (pid !== undefined && removed.has(pid)) ||
+          (snapCid !== undefined && removed.has(snapCid));
+
+        if (hit) {
+          line.removed = true;
+          orphanLinesRemoved++;
+          changed = true;
+          // Propagate this line's callId so its siblings (paired after, logs,
+          // snapshots sharing the callId) are swept on a later pass.
+          if (cid !== undefined && !removed.has(cid)) removed.add(cid);
+        }
+      }
+    }
+  }
+  return { orphanLinesRemoved, removedCallIds: removed };
+}
+
+/**
+ * Sanity pass — asserts the two streams agree after removal.
+ *
+ * Scans every surviving line across all `*.trace` streams and reports any that
+ * still references a removed callId via `stepId`, `parentId`, or
+ * `snapshot.callId`. A clean run logs nothing; survivors indicate the removal
+ * left the streams inconsistent and are surfaced as a warning rather than
+ * silently shipped in the sanitized archive.
+ *
+ * @returns The number of dangling references found (0 when consistent).
+ */
+function assertNoDanglingReferences(
+  traceFiles: NdjsonFile[],
+  removedCallIds: Set<string>,
+  inputPath: string
+): number {
+  let dangling = 0;
+  for (const file of traceFiles) {
+    for (const line of file.lines) {
+      if (line.removed || !line.obj) continue;
+      const o = line.obj;
+      const cid = typeof o['callId'] === 'string' ? (o['callId'] as string) : undefined;
+      const sid = typeof o['stepId'] === 'string' && o['stepId'] !== cid ? (o['stepId'] as string) : undefined;
+      const pid = typeof o['parentId'] === 'string' ? (o['parentId'] as string) : undefined;
+      const snap = o['snapshot'];
+      const snapCid =
+        snap && typeof snap === 'object' && typeof (snap as Record<string, unknown>)['callId'] === 'string'
+          ? ((snap as Record<string, unknown>)['callId'] as string)
+          : undefined;
+      if (
+        (sid !== undefined && removedCallIds.has(sid)) ||
+        (pid !== undefined && removedCallIds.has(pid)) ||
+        (snapCid !== undefined && removedCallIds.has(snapCid))
+      ) {
+        dangling++;
+      }
+    }
+  }
+  if (dangling > 0) {
+    logger.warn(
+      `Sanitized ${inputPath}: ${dangling} event(s) still reference a removed ` +
+      `callId across trace streams after cross-stream sweep. The trace may show ` +
+      `orphan rows in the viewer. Please file an issue with a sample trace.`
+    );
+  }
+  return dangling;
 }
 
 /**
@@ -637,6 +796,28 @@ export async function processTraceFile(
     const allRemovedCallIds = new Set<string>();
     for (const ids of removedCallIdsByFile.values()) {
       for (const id of ids) allRemovedCallIds.add(id);
+    }
+
+    // ── Phase 2: cross-stream orphan sweep ──
+    // Remove correlated lines the step graph can't see (frame-snapshots whose
+    // callId is nested under `snapshot.callId`, and fire-and-forget event/log
+    // lines that reference a removed step only through `stepId`). The swept
+    // callId set then also feeds network dropping below.
+    if (allRemovedCallIds.size > 0) {
+      const { orphanLinesRemoved, removedCallIds } = sweepCrossStreamOrphans(
+        traceFiles,
+        allRemovedCallIds
+      );
+      if (orphanLinesRemoved > 0) {
+        modified = true;
+        logger.verbose(
+          `Cross-stream sweep removed ${orphanLinesRemoved} orphan line(s) in ${inputPath}`
+        );
+      }
+      for (const id of removedCallIds) allRemovedCallIds.add(id);
+
+      // ── Sanity pass ── assert the streams now agree.
+      assertNoDanglingReferences(traceFiles, allRemovedCallIds, inputPath);
     }
 
     if (allRemovedCallIds.size > 0 || removedUrls.size > 0) {

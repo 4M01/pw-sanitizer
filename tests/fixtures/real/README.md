@@ -9,6 +9,18 @@ exactly how the 0.1.x format bug shipped.
 | `modern/`   | @playwright/test 1.61 | `test.step`-based spec; `<template id="playwrightReportBase64">`      |
 | `v1.40/`    | @playwright/test 1.40 | same spec; `window.playwrightReportBase64 = "data:...";` script form  |
 | `no-steps/` | @playwright/test 1.61 | **no `test.step` at all** — APIRequestContext calls against a local HTTP server. The zip contains `test.trace` (pw:api runner steps), `0-trace.trace` (library `call@N` events linked via `stepId`, plus `log` lines), `0-trace.network` (`resource-snapshot` entries without callIds) and `0-trace.stacks`. |
+| `nested-browser/` | **real-format synthetic** (see caveat below) | A step nested **three levels deep** (`test.step` → `test.step` → `pw:api`) whose leaves have browser children in `0-trace.trace`, correlated back only via `stepId`, plus `frame-snapshot` lines (`snapshot.callId`) and a fire-and-forget `event`. Exercises the cross-stream orphan removal in `tests/integration/cross-stream-orphans.test.ts`. |
+
+> **Caveat — `nested-browser/` is the one synthetic fixture here.** No genuine
+> capture in this repo happens to combine a ≥3-level-deep step with browser-side
+> children, so this archive is assembled by
+> `scripts/make-nested-browser-fixture.mjs` using the **exact** event shapes a
+> real Playwright 1.61 trace emits (verified byte-for-byte against the
+> `no-steps/` and `playwright-project/.../real-actions` captures). The
+> authoritative test builds the same structure in-memory; the committed `.zip`
+> is a convenience for manual inspection with `npx playwright show-trace`. If
+> you can capture a genuine run with this shape, replace it and drop the
+> generator.
 
 `modern/trace-viewer-asset.html` is the genuine static
 `playwright-report/trace/index.html` shipped inside the report directory
