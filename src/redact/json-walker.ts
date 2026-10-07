@@ -38,10 +38,27 @@ export function walkAndRedact(
 ): WalkResult {
   const matches: RedactionMatch[] = [];
   let count = 0;
+  // Root strings and primitive array elements have no property key. Preserve
+  // key-only and key+value constraints by applying only value-only patterns.
+  const scalarPatterns = patterns.filter((pattern) => pattern.key === undefined);
 
   function walk(node: unknown, keyPath: string): unknown {
     if (node === null || node === undefined) {
       return node;
+    }
+
+    if (typeof node === 'string') {
+      const redactionResult = redactValue('', node, scalarPatterns, config);
+      if (
+        redactionResult.redacted &&
+        redactionResult.matchedPatternId !== undefined
+      ) {
+        count++;
+        matches.push({ keyPath, patternId: redactionResult.matchedPatternId });
+        return redactionResult.value;
+      }
+      const parsed = tryParseJson(node);
+      return parsed === undefined ? node : JSON.stringify(walk(parsed, keyPath));
     }
 
     if (Array.isArray(node)) {
